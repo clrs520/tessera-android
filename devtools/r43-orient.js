@@ -1,0 +1,1 @@
+JSON.stringify({ o: window.orientation, w: innerWidth, h: innerHeight, coarse: matchMedia('(hover: none) and (pointer: coarse)').matches, land: matchMedia('(orientation: landscape)').matches, sq: Math.round(document.querySelector('#headerActionsGroup button:not(.choice-segment)').getBoundingClientRect().width) })

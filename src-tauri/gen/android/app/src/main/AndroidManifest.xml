@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Long-press on an event card answers with a short vibration so the gesture is confirmed
+         before the menu appears. A normal permission: installed at once, nothing to grant. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- TeslaCam folders are copied onto shared storage, so the app reads them by
+         absolute path; MANAGE_EXTERNAL_STORAGE is the only way to do that from a
+         sideloaded app on Android 11+. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
+    <!-- A clip takes minutes to encode and the user is expected to put the phone away meanwhile,
+         which is exactly when the system freezes an ordinary background process, suspends the CPU
+         at screen-off, and (Android 12+) stops handing it a hardware codec. All three are answered
+         by a dataSync foreground service; the notification it shows needs its own permission from
+         Android 13 on, and is asked for at the first export rather than at install. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- AndroidTV support -->
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+
+    <!-- A TeslaCam stick on an OTG cable is read through the filesystem Android already
+         mounted, so no USB permission is requested; the feature is declared only so stores
+         do not hide the app from the many tablets and phones that have no OTG port. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.tdashcam_studio"
+        android:enableOnBackInvokedCallback="true"
+        android:requestLegacyExternalStorage="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:usesCleartextTraffic="${usesCleartextTraffic}">
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:launchMode="singleTask"
+            android:label="@string/main_activity_title"
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <!-- AndroidTV support -->
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+            <!-- R193 — 进程被杀掉之后，插上盘也要能把 APP 带起来。MEDIA_MOUNTED 在 Android 8+ 不能
+                 写进 manifest，能写进 manifest 的只有「USB 设备接入」这条：类型 8/6/80（大容量存储）
+                 才会命中，键盘鼠标不会。运行时那条广播仍然负责「已经在跑」的所有情形。 -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/usb_device_filter" />
+        </activity>
+
+        <!-- Owns the export while the page may not be there to watch it. Started only from a tap
+             inside the app, so it never trips the Android 12+ background-start restriction. -->
+        <service
+            android:name=".ExportService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- R190: 扫描 2 TB 那盘要一两分钟，用户插上盘就锁屏是常态。它只在这段时间里把进程放在
+             前台（dataSync，与导出同一个理由：搬文件系统元数据），扫完立刻停。 -->
+        <service
+            android:name=".ScanService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+    </application>
+</manifest>

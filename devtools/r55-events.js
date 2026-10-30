@@ -1,0 +1,1 @@
+JSON.stringify((window.viewer&&window.viewer.eventGroups||[]).slice(0,4).map(function(e){return {t:e.eventType,st:e.startTime};}))

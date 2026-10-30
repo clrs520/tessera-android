@@ -1,0 +1,10 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme. -->
+    <style name="Theme.tdashcam_studio" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- The page draws behind the system bars, so the Material theme's opaque bar colours
+             would show as coloured strips on devices below Android 15, which ignores them. -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+    </style>
+</resources>

@@ -1,0 +1,1 @@
+(function(){var b=document.getElementById("searchCancelBtn");b.click();return JSON.stringify({after:b.value,v:document.getElementById("eventSearch").value,cards:document.querySelectorAll("[data-event-id]").length});})()

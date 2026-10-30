@@ -1,0 +1,1 @@
+(() => { try { const b = document.querySelector('.time-preview'); return JSON.stringify({ shown: b ? getComputedStyle(b).opacity + '/' + (b.textContent || '').trim() : 'none' }); } catch (e) { return 'THREW ' + e.message; } })()

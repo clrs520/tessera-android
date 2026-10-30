@@ -1,0 +1,1455 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>特写</title>
+    <link rel="icon" href="logo.png" type="image/png">
+    <link rel="stylesheet" href="vendor/flatpickr.min.css">
+    <link rel="stylesheet" href="styles.css">
+    <!-- The drawer is put away on a phone, but `index.html` ships it open and script.js — which is
+         at the end of <body>, so after the first paint — collapses it against a 0.3s margin
+         transition. That played the list sliding in and straight back out on every cold start.
+         This runs before any of the body is parsed, so the phone layout is known while the page is
+         still blank. The query must stay identical to PHONE_LAYOUT_QUERY in script.js. -->
+    <script>
+        if (window.matchMedia('(max-width: 768px), (orientation: landscape) and (max-height: 620px) and (max-width: 1200px), (hover: none) and (pointer: coarse)').matches) {
+            document.documentElement.classList.add('phone-boot');
+        }
+        // Same reasoning one layer up: `applyTheme` lives in script.js, which is at the end of
+        // <body>, so a phone in night mode opened to a full light screen and then flipped dark.
+        // This resolves the same three states from the same key while the page is still blank, and
+        // the answer is parked on the root element for the script that opens <body> to pick up.
+        (function () {
+            var mode = 'auto';
+            try { mode = localStorage.getItem('tdashcam.themeMode') || 'auto'; } catch (e) {}
+            var dark = mode === 'dark' ||
+                (mode !== 'light' && window.matchMedia &&
+                    window.matchMedia('(prefers-color-scheme: dark)').matches);
+            document.documentElement.dataset.bootTheme = dark ? 'dark' : 'light';
+            // The root scheme is what paints the canvas behind the body, so it has to be set here
+            // and not only once the body exists.
+            document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+        })();
+        // R162 — an Android 10 device whose WebView never got a Play Store update is still on
+        // Chromium 74, which cannot parse `?.` or `??`; the shell paints and then nothing works.
+        // This file is parsed before the bundle, so it can say why instead of leaving a dead UI.
+        (function () {
+            var supported = true;
+            try { new Function('var a={};a?.b;var c=null;c??1;'); } catch (e) { supported = false; }
+            window.__unsupportedWebView = !supported;
+            if (supported) return;
+            document.addEventListener('DOMContentLoaded', function () {
+                var box = document.createElement('div');
+                box.id = 'unsupportedWebView';
+                box.setAttribute('role', 'alert');
+                box.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:2147483647;display:flex;' +
+                    'align-items:center;justify-content:center;padding:28px;background:#111;' +
+                    'color:#f4f4f5;font:16px/1.7 system-ui,sans-serif;text-align:center;';
+                box.innerHTML = '<div style="max-width:34em">' +
+                    '<div style="font-size:20px;font-weight:600;margin-bottom:12px">' +
+                    '需要更新系统 WebView</div>' +
+                    '<div>当前系统 WebView 版本过旧，特写无法启动。<br>' +
+                    '请在应用商店更新「Android System WebView」后重新打开。</div>' +
+                    '<div style="margin-top:14px;color:#a1a1aa;font-size:14px">' +
+                    'This build needs an updated Android System WebView.</div></div>';
+                document.body.appendChild(box);
+            });
+        })();
+    </script>
+</head>
+<body>
+    <script>
+        // Before a single element of the page is parsed. `body.dark-theme` is where every dark
+        // token hangs, so this is what keeps the first painted frame from being the wrong theme.
+        if (document.documentElement.dataset.bootTheme === 'dark') {
+            document.body.classList.add('dark-theme');
+        }
+    </script>
+    <!-- R102 液态玻璃（C 档）的折射滤镜。`backdrop-filter: url(#…)` 在安卓 WebView 里确实会上屏，但
+         成因和最初设想不同，这张图是量出来的不是推出来的（devtools/r102-lens-ab.mjs，玻璃板压在硬边缘
+         棋盘格上逐变体截图比像素）：后景的 alpha 处处不透明，所以 SourceAlpha 虚化后在中间是一张常数场，
+         位移为零；只有滤镜区域边界那一圈读到的是「没有后景」，于是偏差集中出现在玻璃内侧约 11–20px 的
+         环带上。实测：加 url() 相对只 blur 的版本，内圈差值 mean 0.019（等于没动），边缘圈 13.2 / 75%
+         像素变形 —— 中间是毛玻璃、边缘起透镜，正是 C 档要的形状。
+         R103 把力度从 -20 调到 -45：用户实机反馈「效果不明显」，扫参数（devtools/r103-lens-sweep.mjs）
+         的读数是 scale -20 边圈 11.8 / -30 15.4 / -45 18.9 而内圈始终 ≈0，-60 才开始把中间也抹糊
+         （内圈 0.31），所以取 -45。同一次扫描还证明 **stdDeviation 是个空旋钮**：-30/11 与 -30/16、
+         -45/11 与 -45/16 与 -45/24 的读数逐位相同 —— 环带宽度由滤镜区域边界决定，不由这张虚化场决定。
+         `color-interpolation-filters="sRGB"` 不是可选的：滤镜默认在 linearRGB 里算，后景的红色会被
+         整体压暗偏灰，画面上的车漆和尾灯会变色。
+         放在 <body> 最前面而不是脚本里动态建，是因为滤镜要在第一帧就能被 CSS 引用到。 -->
+    <svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+        <filter id="tesseraLens" x="-20%" y="-20%" width="140%" height="140%"
+                color-interpolation-filters="sRGB">
+            <feGaussianBlur in="SourceAlpha" stdDeviation="11" result="edge"/>
+            <feDisplacementMap in="SourceGraphic" in2="edge" scale="-45"
+                               xChannelSelector="R" yChannelSelector="G"/>
+        </filter>
+    </svg>
+    <div class="container">
+        <div class="sidebar">
+            <!-- On a touch shell these two rows read as one nav bar: title on the left and a single
+                 trailing slot on the right, which holds 完成 normally and 取消 while the search
+                 field is focused (see the phone tier in styles.css, where the desktop gradient,
+                 hairline and sidebar toggle are taken back out). The field owns row 2 by itself. -->
+            <div class="sidebar-header">
+                <div class="header-title">
+                    <img src="logo.png" alt="Logo" class="header-logo">
+                    <!-- On a phone the drawer *is* the 片段 page and the bottom bar is faded out under
+                         it, so this row is the only place left that can say where you are. Desktop
+                         keeps the wordmark; the phone tier swaps it for the page name (logo stays). -->
+                    <span class="header-app-name">特写</span>
+                    <span class="header-page-name" data-i18n="tabClips">片段</span>
+                </div>
+                    <button type="button" id="filterToggleBtn" class="filter-toggle-btn" title="筛选条件"
+                        aria-label="筛选条件" data-i18n-aria="ariaFilters" aria-expanded="false">
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M3 5h18l-7 8v5l-4 2v-7L3 5z" stroke="var(--icon-color, white)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
+                    <button id="toggleSidebarBtn" class="toggle-sidebar-btn" title="切换侧边栏">
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M4 6h16M4 12h16M4 18h16" stroke="var(--icon-color, white)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
+                    <button type="button" id="drawerSelectBtn" class="drawer-done-btn drawer-select-btn">选择</button>
+                    <button type="button" id="selectAllBtn" class="drawer-done-btn select-all-btn" hidden>全选</button>
+                    <button type="button" id="drawerDoneBtn" class="drawer-done-btn">完成</button>
+                    <button type="button" id="searchCancelBtn" class="search-cancel-btn">取消</button>
+            </div>
+            <div class="event-search-row">
+                <input type="search" id="eventSearch" class="event-search" placeholder="搜索事件">
+            </div>
+            <!-- R171: sideways this whole group becomes a sheet that folds out of the drawer's right
+                 edge (see the R171 block in styles.css). Everywhere else `display: contents` keeps
+                 the original flex layout, so the desktop and portrait drawers do not move. -->
+            <div class="filter-stack">
+            <div class="filter-sheet-head">
+                <span class="filter-sheet-title" data-i18n="filterTitle">筛选</span>
+                <!-- R174: the count and the size used to sit in a fixed bar at the bottom of the
+                     sheet while the head repeated the count. Both now live here, centred, and the
+                     footer is gone — 30px of body height back for the rows underneath. -->
+                <span class="filter-sheet-meta">
+                    <span class="filter-sheet-count" id="filterCount"></span>
+                    <span class="filter-sheet-size" id="filterSize"></span>
+                    <span class="filter-summary-tag" id="filterSummaryTag" data-i18n="filterApplied" hidden>已筛选</span>
+                </span>
+                <span class="filter-sheet-spacer"></span>
+                <button type="button" id="filterResetBtn" class="filter-sheet-action" data-i18n="filterReset">重置</button>
+                <button type="button" id="filterCollapseBtn" class="filter-sheet-action" data-i18n="filterCollapse">收起</button>
+            </div>
+            <div class="filter-sheet-body">
+            <div class="filters">
+                <div class="filter-group filter-date-group">
+                    <label for="dateFilter">日期</label>
+                    <div class="date-input-wrapper">
+                        <input type="text" id="dateFilter" placeholder="选择日期">
+                        <button type="button" id="clearDateBtn" class="clear-date-btn" title="清除日期"
+                            aria-label="清除日期筛选" data-i18n-aria="ariaClearDate">&times;</button>
+                    </div>
+                </div>
+                <div class="filter-group filter-type-group">
+                    <label for="eventFilter">事件类型</label>
+                    <select id="eventFilter">
+                        <option value="">所有类型</option>
+                        <option value="RecentClips">最近片段</option>
+                        <option value="SavedClips">保存片段</option>
+                        <option value="SentryClips">哨兵模式</option>
+                    </select>
+                    <!-- R118: a <select> is the one control in this drawer whose popup the app
+                         cannot style — system chrome, system colours, and on Android a second
+                         layer over the glass. Four named segments say the same thing and stay
+                         inside the sheet. The select stays in the markup as the value holder:
+                         every reader of `dom.eventFilter` (筛选、清除筛选、hasActiveFilters) keeps
+                         working. Desktop keeps its dropdown — the gate is `html.touch-ui`, which
+                         only the Android shell raises, so a narrowed desktop window is untouched. -->
+                    <div class="choice-segments type-segments" id="eventTypeSegments"
+                         role="radiogroup" aria-label="事件类型">
+                        <button type="button" class="choice-segment" data-mode="" role="radio" aria-checked="false">全部</button>
+                        <button type="button" class="choice-segment" data-mode="RecentClips" role="radio" aria-checked="false">最近</button>
+                        <button type="button" class="choice-segment" data-mode="SavedClips" role="radio" aria-checked="false">保存</button>
+                        <button type="button" class="choice-segment" data-mode="SentryClips" role="radio" aria-checked="false">哨兵</button>
+                    </div>
+                </div>
+            </div>
+            <div class="filter-block filter-date-block">
+                <div class="filter-block-label" data-i18n="filterDateLabel">日期</div>
+                <div id="quickFilters" class="quick-filters">
+                    <div class="date-chip-row">
+                        <div id="dateChips" class="date-chips"></div>
+                        <button type="button" id="filterCalendarBtn" class="filter-calendar-btn"
+                            aria-label="选择日期" data-i18n-aria="selectDate">
+                            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                <rect x="3.5" y="5.5" width="17" height="15" rx="3" stroke="currentColor" stroke-width="1.8"/>
+                                <path d="M3.5 10h17M8 3.5v4M16 3.5v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="filter-block filter-day-block">
+                <div class="filter-block-label" data-i18n="filterDayLabel">按天分布</div>
+                <div id="filterDayChart" class="filter-day-chart"></div>
+            </div>
+            <!-- R173 · B8: the three list-wide switches lived only in the ⋮ menu, so filtering the
+                 list meant opening a panel on the other side of the screen and coming back. Same
+                 actions, same state, one row inside the sheet. `.choice-segments` / `.choice-segment`
+                 / `.on` are the tier the type row already uses, so the selected violet is one vocabulary. -->
+            <div class="filter-block filter-view-block">
+                <!-- No block label: the chips say what they are, and the 19px it would take is the
+                     difference between 来源 starting above the fold and just below it. The group
+                     keeps its own aria-label for readers. -->
+                <div class="choice-segments filter-view-row" role="group" aria-label="显示"
+                     data-i18n-aria="filterViewLabel">
+                    <button type="button" id="sheetStarBtn" class="choice-segment filter-view-chip" aria-pressed="false">只看收藏</button>
+                    <button type="button" id="sheetTriggerBtn" class="choice-segment filter-view-chip" aria-pressed="false">只看触发</button>
+                    <button type="button" id="sheetSortBtn" class="choice-segment filter-view-chip">最新优先</button>
+                </div>
+            </div>
+            <!-- Phone-only: the folder lived in one slot only, so switching between two cars
+                 meant re-walking the tree. A row of chips, newest first. In the landscape sheet
+                 the same chips become the source cards. -->
+            <div class="filter-block filter-source-block">
+                <div class="filter-block-label" data-i18n="filterSourceLabel">来源</div>
+                <div id="recentDirs" class="recent-dirs" style="display: none;"></div>
+                <!-- R173 · C9: the sheet is 281px tall and a stack of source cards pushed the list
+                     below the fold. Only the folder in play stays; the rest wait behind this. -->
+                <button type="button" id="sourceMoreBtn" class="source-more-btn" aria-expanded="false" hidden></button>
+            </div>
+            </div>
+            </div>
+            <div id="permBanner" class="perm-banner" style="display: none;">
+                <span id="permBannerText"></span>
+                <button type="button" id="permBannerBtn" class="perm-banner-btn"></button>
+            </div>
+            <div id="ptrSpinner" class="ptr-spinner" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 11-2.5-5.8M20 4v4h-4"/></svg>
+                <span data-i18n="pullToRefresh">下拉重新扫描</span>
+            </div>
+            <!-- R182: 「最近」不给单条删除（循环片段共用一个文件夹），左滑与长按菜单都按这条规则
+                 把动作收掉了 —— 收掉不等于说清楚，用户只会以为坏了。这句话属于这批列表，所以钉在
+                 列表头顶（`#fileList` 自己是滚动容器，它不跟着滚走），而不是夹在筛选控件中间。 -->
+            <div class="filter-note" id="filterNote" hidden></div>
+            <div id="fileList" class="file-list">
+            </div>
+            <div class="sidebar-footer">
+                <button id="batchDeleteBtn" class="batch-delete-btn" type="button" hidden>删除</button>
+                <button id="selectFolderBtn">选择文件夹</button>
+                <input type="file" id="folderInput" webkitdirectory directory multiple style="display: none;">
+                <input type="file" id="fileInputIOS" multiple accept="video/mp4,video/*" style="display: none;">
+                <div class="app-version" id="appVersion" style="display: none;"></div>
+            </div>
+        </div>
+        <div class="main-content">
+            <header class="main-header">
+                <div class="header-left">
+                    <button type="button" id="headerEventName" class="header-event-name"></button>
+                    <button id="openSidebarBtn" class="open-sidebar-btn" title="打开侧边栏">
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M4 6h16M4 12h16M4 18h16" stroke="var(--icon-color, white)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                        <span class="open-sidebar-label" id="openSidebarLabel">视频列表</span>
+                    </button>
+                </div>
+                <div class="header-center-info">
+                    <div id="headerLocationDisplay" class="header-location"></div>
+                    <div id="realTimeClock" class="real-time-clock">--:--:--</div>
+                </div>
+                <div class="header-right" id="headerRight">
+                    <div class="header-actions-group" id="headerActionsGroup">
+                        <!-- Three labelled sections, because fifteen undifferentiated rows are a list
+                             nobody reads. The dividers exist only for the phone grid (`display: none`
+                             at the base rule), so the desktop menu keeps its plain column. -->
+                        <div class="menu-divider" aria-hidden="true"><span data-i18n="menuClip">这一段录像</span></div>
+                        <button id="metaSwitchBtn" class="metadata-switch-btn" title="显示/隐藏元数据" disabled>
+                            <span class="btn-icon">🚗</span>
+                            <span class="btn-text" data-i18n="metadata">元数据</span>
+                        </button>
+                        <button id="metaDetailBtn" class="control-btn" title="查看详细元数据" disabled>
+                            <span class="btn-icon">📊</span>
+                            <span class="btn-text" data-i18n="metadataDetail">详细数据</span>
+                        </button>
+                        <button id="exportMetadataBtn" class="control-btn" title="导出元数据CSV" disabled>
+                            <span class="btn-icon">📥</span>
+                            <span class="btn-text" data-i18n="exportMetadata">导出数据</span>
+                        </button>
+                        <button id="revealFileBtn" class="control-btn" title="显示文件路径" disabled>
+                            <span class="btn-icon">📂</span>
+                            <span class="btn-text" data-i18n="revealFile">显示路径</span>
+                        </button>
+                        <button id="downloadFileBtn" class="control-btn" title="下载当前文件" disabled>
+                            <span class="btn-icon">💾</span>
+                            <span class="btn-text" data-i18n="downloadFile">下载视频</span>
+                        </button>
+                        <button id="snapshotBtn" class="control-btn phone-only-btn" title="保存当前画面" disabled>
+                            <span class="btn-icon">📷</span>
+                            <span class="btn-text" data-i18n="snapshot">抓帧</span>
+                        </button>
+                        <!-- These five carry a value ("：开", "新→旧") and used to be pinned to a full row
+                             so the value would not get ellipsised. A block of full-width rows under a
+                             two-column grid reads as broken, so they pair now and the English labels
+                             are shortened instead (see `tapMode*` in i18n). -->
+                        <div class="menu-divider" aria-hidden="true"><span data-i18n="menuPlayback">播放与列表</span></div>
+                        <!-- The four rows below are preferences with a value on the label, not actions.
+                             `data-keep-menu` tells the panel's outside-click handler to stay open so a
+                             second one can be changed in the same visit. -->
+                        <button id="autoNextBtn" class="control-btn phone-only-btn" data-keep-menu title="播完自动下一个">
+                            <span class="btn-icon">⏭</span>
+                            <span class="btn-text">连续播放：关</span>
+                        </button>
+                        <button id="starFilterBtn" class="control-btn phone-only-btn" data-keep-menu title="只看收藏的事件">
+                            <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M12 3.6l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg></span>
+                            <span class="btn-text" id="starFilterLabel" data-i18n="starFilterOff">只看收藏：关</span>
+                        </button>
+                        <!-- R96: the reason a clip was kept is the one thing the list could not ask for.
+                             It was only ever shown on the playing screen, so finding the sentry hits
+                             meant opening clips one by one. Same row, same verb as 只看收藏. -->
+                        <button id="triggerFilterBtn" class="control-btn phone-only-btn" data-keep-menu title="只看触发的事件">
+                            <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M12 3v4M12 21v-3M3 12h4M21 12h-3M12 8.5a3.5 3.5 0 100 7 3.5 3.5 0 000-7z"/></svg></span>
+                            <span class="btn-text" id="triggerFilterLabel" data-i18n="triggerFilterOff">只看触发：关</span>
+                        </button>
+                        <button id="sortOrderBtn" class="control-btn phone-only-btn" data-keep-menu title="切换列表排序">
+                            <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M7 4v16M7 20l-3-3M7 20l3-3M17 20V4M17 4l-3 3M17 4l3 3"/></svg></span>
+                            <span class="btn-text" id="sortOrderLabel" data-i18n="sortNewest">排序：新→旧</span>
+                        </button>
+                        <!-- Two more phone-only preferences, both of which are things a person has
+                             an opinion about and the app should not insist on. -->
+                        <button id="triggerHlBtn" class="control-btn phone-only-btn" data-keep-menu title="触发时在看的那一路要不要描边">
+                            <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M4 8V5h3M20 8V5h-3M4 16v3h3M20 16v3h-3M12 9v4M12 16v.5"/></svg></span>
+                            <span class="btn-text" id="triggerHlLabel" data-i18n="triggerHlOn">触发标注：开</span>
+                        </button>
+                        <!-- R98: the clip range already exists for exporting; this replays it while
+                             watching. `syncChoiceRow()`-style direct label writes own its text, so no
+                             `data-i18n` here either — a row painted by two mechanisms drifts. -->
+                        <button id="loopABBtn" class="control-btn phone-only-btn" data-keep-menu aria-pressed="false" title="反复播放当前剪辑区间">
+                            <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M4 10h11a4 4 0 0 0 0-8h-4M4 10l3-3M4 10l3 3M20 14H9a4 4 0 0 0 0 8h4M20 14l-3 3M20 14l-3-3"/></svg></span>
+                            <span class="btn-text" id="loopABLabel">A-B 循环：关</span>
+                        </button>
+                        <!-- Three states used to live behind one button that walked them in order, so
+                             reaching 「跳到事件」 from 「接着上次」 cost two taps and told you nothing
+                             about what the other options were. A row of named segments fixes both.
+                             `syncChoiceRow()` owns the wording of these rows, so they carry no
+                             `data-i18n`: a row painted twice, once per mechanism, drifts. -->
+                        <div class="menu-choice" id="tapBehaviorChoice" role="group"
+                             aria-labelledby="tapChoiceLabel" title="点列表里的视频之后从哪里开始播">
+                            <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M7 5v14M11 12l7-4.3v8.6z"/></svg></span>
+                            <span class="choice-label" id="tapChoiceLabel">播放起点</span>
+                            <div class="choice-segments">
+                                <button type="button" class="choice-segment" data-mode="resume" role="radio" aria-checked="false">接着上次</button>
+                                <button type="button" class="choice-segment" data-mode="start" role="radio" aria-checked="false">从头播</button>
+                                <button type="button" class="choice-segment" data-mode="event" role="radio" aria-checked="false">跳到事件</button>
+                            </div>
+                        </div>
+                        <!-- R159: two preferences the ruler needs. 「换段缝」 decides whether the
+                             2–4 s seams between clips get a tick of their own or only the real holes
+                             do; 「最近片段」 decides whether the 24 h folder stays one event or is cut
+                             into days / drive sessions. Both are phone-only (`menu-choice` is hidden
+                             on a desk) and both repaint themselves through `syncChoiceRow()`. -->
+                        <div class="menu-choice" id="gapMarkChoice" role="group"
+                             aria-labelledby="gapChoiceLabel" title="时间轴上的换段缝要标到什么程度">
+                            <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M4 12h5M15 12h5M12 5v3M12 16v3"/></svg></span>
+                            <span class="choice-label" id="gapChoiceLabel">换段缝</span>
+                            <div class="choice-segments">
+                                <button type="button" class="choice-segment" data-mode="all" role="radio" aria-checked="false">全部标出</button>
+                                <button type="button" class="choice-segment" data-mode="holes" role="radio" aria-checked="false">只标大缺口</button>
+                            </div>
+                        </div>
+                        <div class="menu-choice" id="recentSplitChoice" role="group"
+                             aria-labelledby="recentSplitLabel" title="最近片段要不要按天或按驾驶时段拆开">
+                            <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h13"/></svg></span>
+                            <span class="choice-label" id="recentSplitLabel">最近片段</span>
+                            <div class="choice-segments">
+                                <button type="button" class="choice-segment" data-mode="none" role="radio" aria-checked="false">一整个</button>
+                                <button type="button" class="choice-segment" data-mode="day" role="radio" aria-checked="false">按天</button>
+                                <button type="button" class="choice-segment" data-mode="session" role="radio" aria-checked="false">按段</button>
+                            </div>
+                        </div>
+                        <div class="menu-divider" aria-hidden="true"><span data-i18n="menuOther">其他</span></div>
+                        <!-- The two things the bottom bar used to carry as tabs. They are actions, so
+                             unlike the preference rows above them they do NOT carry `data-keep-menu`:
+                             choosing a folder opens the browser, which is a different layer. -->
+                        <button id="menuFolderBtn" class="control-btn phone-only-btn" title="换一片录像目录">
+                            <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M3 7.5A2 2 0 015 5.5h3.6a2 2 0 011.5.7l1 1.3H19a2 2 0 012 2v7a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg></span>
+                            <span class="btn-text" data-i18n="menuFolder">选择文件夹</span>
+                        </button>
+                        <button id="menuRefreshBtn" class="control-btn phone-only-btn" title="重新扫描当前目录">
+                            <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 11-2.5-5.8M20 4v4h-4"/></svg></span>
+                            <span class="btn-text" data-i18n="menuRefresh">刷新列表</span>
+                        </button>
+                        <button id="diagnosticsBtn" class="control-btn phone-only-btn" title="复制诊断信息">
+                            <span class="btn-icon">🧾</span>
+                            <span class="btn-text" data-i18n="diagnostics">复制诊断</span>
+                        </button>
+                        <button id="gestureHelpBtn" class="control-btn phone-only-btn" title="手势说明">
+                            <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M9 11V5.5a1.5 1.5 0 013 0V11m0-1.5V6a1.5 1.5 0 013 0v5m0-2a1.5 1.5 0 013 0v5.5a6 6 0 01-6 6h-1.2a5 5 0 01-3.9-1.9L5 16.5a1.6 1.6 0 012.5-2l1.5 1.7"/></svg></span>
+                            <span class="btn-text" data-i18n="gestureHelp">手势说明</span>
+                        </button>
+                        <!-- R122 用户第二次提「『复制诊断』后面没有内容」：占满整行他仍然读成空一格。
+                             他要的是**旁边有东西**，所以把「关于」提上来跟它配对（两者都是「看一眼/
+                             导出一份」的收尾动作），语言开关改成整行 —— 否则它会变成新的空一格。
+                             纯 DOM 顺序调整，绑定按 id 找，不受影响。 -->
+                        <!-- Same story as 播放起点 above, and the same reason the old button stays in the
+                             markup: the desktop header cycles with one tap and is not being changed. -->
+                        <div class="menu-choice" id="themeChoice" role="group"
+                             aria-labelledby="themeChoiceLabel" title="深浅色">
+                            <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18 9 9 0 1 0 0-18zM12 3v18"/></svg></span>
+                            <span class="choice-label" id="themeChoiceLabel">主题</span>
+                            <div class="choice-segments">
+                                <button type="button" class="choice-segment" data-mode="auto" role="radio" aria-checked="false">跟随系统</button>
+                                <button type="button" class="choice-segment" data-mode="light" role="radio" aria-checked="false">浅色</button>
+                                <button type="button" class="choice-segment" data-mode="dark" role="radio" aria-checked="false">深色</button>
+                            </div>
+                        </div>
+                        <button id="themeToggleBtn" class="control-btn theme-toggle-btn" title="切换主题">
+                            <span class="btn-icon">🌙</span>
+                            <span class="btn-text" data-i18n="toggleTheme">主题切换</span>
+                        </button>
+                        <!-- R109: 这里原来有一行「玻璃折射：开/关」。R108 加它时以为他看到的变色是
+                             折射档造成的，实测推翻 —— 折射只决定弯不弯，颜色来回变是自适应透度没有
+                             迟滞。一个指不到成因的开关只会让 ⋮ 面板多一行、诊断多两个字段，撤掉。
+                             材质档由 CSS.supports 能力判据 + 可读性求解自己决定，不再有用户侧偏好。 -->
+                        <!-- R67-C: the brightness gesture's upper half asks the window for more
+                             backlight than the system slider allows, and until now the only sign of
+                             it was the screen being bright and the only way out was a second hidden
+                             drag. This row says which of the two the page is in, and taps back.
+                             `updateBrightnessRow()` owns the wording, so no `data-i18n`. -->
+                        <button id="brightnessRowBtn" class="control-btn phone-only-btn" data-keep-menu>
+                            <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M3 19h18M8 19a4 4 0 018 0M12 5.5v2.6M5.9 8.9l1.9 1.9M18.1 8.9l-1.9 1.9"/></svg></span>
+                            <span class="btn-text" id="brightnessRowLabel">亮度：跟系统</span>
+                        </button>
+                        <!-- R63-7: the picture is now carrying seven gestures and none of them is
+                             labelled — that is what makes them good gestures and what makes them
+                             undiscoverable. This is the one place that says what the fingers can do.
+                             R100: this row sits *before* the language row on purpose. Sideways the
+                             panel is a seven-column grid and the language row spans two cells, so with
+                             the old order 手势说明 was pushed into column 7 — the only column the two
+                             rows above it leave empty — and its icon stopped lining up with 下载视频 /
+                             触发标注. Swapped, it lands in column 5 like its neighbours and the wide
+                             language row takes the leftover 6–7. -->
+                        <button id="langToggleBtn" class="control-btn lang-toggle-btn" title="Switch Language">
+                            <span class="btn-icon">中</span>
+                            <span class="btn-text" data-i18n="toggleLanguage">语言</span>
+                        </button>
+                        <button id="aboutBtn" class="control-btn phone-only-btn" title="关于">
+                            <span class="btn-icon">ℹ️</span>
+                            <span class="btn-text" data-i18n="about">关于</span>
+                        </button>
+                        <a href="https://github.com/clrs520/tessera-android" target="_blank" class="github-link control-btn" title="GitHub">
+                            <span class="btn-icon">
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                                    <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                                </svg>
+                            </span>
+                            <span class="btn-text">GitHub</span>
+                        </a>
+                    </div>
+                    <button id="headerMenuBtn" class="header-menu-btn" title="更多选项" aria-expanded="false" aria-haspopup="true">
+                        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M12 13a1 1 0 100-2 1 1 0 000 2zM12 6a1 1 0 100-2 1 1 0 000 2zM12 20a1 1 0 100-2 1 1 0 000 2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
+                </div>
+            </header>
+            <!-- R171: the first second of a clip switch is six files opening; the row goes active
+                 immediately, and this says why the picture has not changed yet when it takes
+                 longer than a tap should. Pointer-transparent, so it never eats a gesture. -->
+            <div id="clipLoadingBadge" class="clip-loading-badge" role="status" aria-hidden="true">
+                <span class="clip-loading-spinner" aria-hidden="true"></span>
+                <span data-i18n="loadingClip">载入中…</span>
+            </div>
+            <div id="playerArea" class="player-area empty">
+                <!-- Swipe-up brightness: a WebView cannot ask the display for less backlight, so
+                     the dim is a layer over the picture and the readout is what makes the gesture
+                     legible. Both are pointer-transparent — the gesture lives on the area itself. -->
+                <div id="phoneBrightnessDim" class="phone-brightness-dim" aria-hidden="true"></div>
+                <div id="phoneBrightnessHud" class="phone-brightness-hud" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none">
+                        <circle cx="12" cy="12" r="4.2" stroke="currentColor" stroke-width="2"/>
+                        <path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2M5.4 5.4l1.6 1.6M17 17l1.6 1.6M18.6 5.4L17 7M7 17l-1.6 1.6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                    <span class="pb-track"><span class="pb-fill" id="phoneBrightnessFill"></span></span>
+                    <span class="pb-value" id="phoneBrightnessValue">100%</span>
+                </div>
+                <!-- The long-press boost says what it is on the picture itself. The 倍速 button is
+                     deliberately not relabelled: the gear you picked is still the gear you picked,
+                     and a menu that changes under your finger reads as a bug. -->
+                <div id="phoneBoostHint" class="phone-boost-hud" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none">
+                        <path d="M4 5l7 7-7 7M13 5l7 7-7 7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span id="phoneBoostValue">3×</span>
+                </div>
+                <!-- R63: the readout for the gestures that change something you cannot see moving —
+                     a ±10s jump leaves the picture looking the same, so without this the only way to
+                     learn the gesture works is to watch the clock. Sits under the band that was
+                     tapped, which is what teaches the mapping. -->
+                <div id="phoneFeedHint" class="phone-feed-hud at-centre" aria-hidden="true">
+                    <span id="phoneFeedValue">+10s</span>
+                </div>
+                <!-- One-time hint on first entry into playback; dismissed by itself after a few
+                     seconds and remembered, so it only ever costs one person one glance. -->
+                <div id="phoneGestureHint" class="phone-gesture-hint" role="status" aria-live="polite">
+                    <span id="phoneGestureHintText">放大成单路后，双击画面左/右可 ±10 秒 · ⋮ 里有「手势说明」</span>
+                    <button type="button" id="phoneGestureHintClose" aria-label="关闭提示">&times;</button>
+                </div>
+                <!-- R32: touch layouts no longer stand on a fixed photo — the same crop looked
+                     different in each orientation and neither was right. What is here instead is a
+                     gradient that re-flows, and the one thing the screen is actually for: a way to
+                     open the list. Hidden by the stylesheet on desktop, which keeps its hero. -->
+                <div id="emptyHero" class="empty-hero">
+                    <span class="empty-hero-icon">
+                        <svg viewBox="0 0 24 24" width="26" height="26" fill="none">
+                            <circle cx="10.6" cy="10.6" r="6.1" stroke="currentColor" stroke-width="1.9"/>
+                            <path d="M15.2 15.2L20 20" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+                        </svg>
+                    </span>
+                    <span class="empty-hero-title" data-i18n="heroTitle">还没有选录像</span>
+                    <span class="empty-hero-hint" data-i18n="heroHint">挑一个 TeslaCam 目录，列表里选一段</span>
+                    <button type="button" id="emptyHeroBtn" class="empty-hero-btn" data-i18n="heroFind">找片</button>
+                </div>
+                <div id="front-container" class="video-container is-main" data-camera="front">
+                    <video id="front-player"></video>
+                    <div class="camera-label">前</div>
+                </div>
+                <div id="back-container" class="video-container is-pip pos-top-right" data-camera="back">
+                    <video id="back-player"></video>
+                    <div class="camera-label">后</div>
+                </div>
+                <div id="left-container" class="video-container is-pip pos-bottom-left" data-camera="left">
+                    <video id="left-player"></video>
+                    <div class="camera-label">左</div>
+                </div>
+                <div id="right-container" class="video-container is-pip pos-bottom-right" data-camera="right">
+                    <video id="right-player"></video>
+                    <div class="camera-label">右</div>
+                </div>
+                <div id="left-pillar-container" class="video-container is-pip hidden" data-camera="left_pillar">
+                    <video id="left-pillar-player"></video>
+                    <div class="camera-label">左柱</div>
+                </div>
+                <div id="right-pillar-container" class="video-container is-pip hidden" data-camera="right_pillar">
+                    <video id="right-pillar-player"></video>
+                    <div class="camera-label">右柱</div>
+                </div>
+
+                <div id="metadataPanel" class="metadata-panel collapsed">
+                    <div class="metadata-content">
+                        <div class="metadata-header">
+                            <span data-i18n="metadata">元数据</span>
+                        </div>
+                        <div class="metadata-body" id="metadataBody">
+                            <div class="metadata-loading" id="metadataLoading" style="display: none;">
+                                <span data-i18n="loadingMetadata">加载中...</span>
+                            </div>
+                            <div class="metadata-empty" id="metadataEmpty">
+                                <span data-i18n="noMetadata">无元数据</span>
+                                <span class="meta-empty-place" id="metadataEmptyPlace"></span>
+                            </div>
+                            <div class="metadata-items" id="metadataItems" style="display: none;">
+                                <!-- Main Dashboard Row -->
+                                <div class="metadata-dashboard">
+                                    <!-- Left Column: Gear + Brake -->
+                                    <div class="meta-left-col">
+                                        <div class="meta-gear" id="metaGear">P</div>
+                                        <div class="meta-brake-container">
+                                            <svg class="meta-brake-icon" id="metaBrakeIcon" viewBox="0 0 1024 1024" width="22" height="22">
+                                                <!-- Brake pedal - inactive state -->
+                                                <g class="brake-inactive">
+                                                    <path d="M821.394 861.482H200.242c-23.709 0-44.013-20.191-45.124-44.975 0 0-30.555-129.896-30.044-166.228 0.325-23.102 15.23-164.3 15.23-164.3 2.449-27.739 18.019-48.258 42.686-48.258h646.233c24.667 0 44.357 21.769 43.759 48.258l14.579 163.622-22.043 166.906c-0.56 24.784-20.414 44.975-44.124 44.975z m24.716-358.364l0.292-10.498c0.23-8.275-6.452-15.059-14.85-15.059H186.497c-8.397 0-14.828 6.784-14.291 15.059l0.681 10.498c0.534 8.232 7.802 14.954 16.153 14.954h641.472c8.35 0 15.37-6.722 15.598-14.954z m8.739 81.304l0.296-10.264c0.233-8.091-6.628-14.724-15.248-14.724H177.735c-8.62 0-15.226 6.633-14.681 14.724l0.691 10.264c0.542 8.049 7.999 14.622 16.571 14.622H838.84c8.574 0 15.777-6.572 16.009-14.622z m6.172 79.506l0.298-10.038c0.235-7.912-6.747-14.399-15.516-14.399H172.234c-8.769 0-15.494 6.487-14.945 14.399l0.695 10.038c0.545 7.872 8.126 14.3 16.847 14.3h669.91c8.721 0 16.047-6.428 16.28-14.3z m-14.901 77.765l0.282-9.819c0.222-7.74-6.466-14.085-14.863-14.085H186.526c-8.397 0-14.841 6.345-14.322 14.085l0.659 9.819c0.517 7.701 7.772 13.989 16.123 13.989h641.548c8.351 0 15.365-6.288 15.586-13.989z m-8.749 76.081l0.267-9.608c0.21-7.573-6.189-13.781-14.222-13.781H206.385c-8.033 0-14.202 6.208-13.711 13.781l0.623 9.608c0.489 7.535 7.425 13.688 15.415 13.688h613.751c7.99 0.001 14.698-6.152 14.908-13.688z m1.869-378.856l36.038-94.167 21.623-119.775H785.183L752.749 356.56l-118.926 82.358H839.24z" fill="rgba(255,255,255,0.3)"/>
+                                                </g>
+                                                <!-- Active state -->
+                                                <g class="brake-active">
+                                                    <path d="M821.394 861.482H200.242c-23.709 0-44.013-20.191-45.124-44.975 0 0-30.555-129.896-30.044-166.228 0.325-23.102 15.23-164.3 15.23-164.3 2.449-27.739 18.019-48.258 42.686-48.258h646.233c24.667 0 44.357 21.769 43.759 48.258l14.579 163.622-22.043 166.906c-0.56 24.784-20.414 44.975-44.124 44.975z m24.716-358.364l0.292-10.498c0.23-8.275-6.452-15.059-14.85-15.059H186.497c-8.397 0-14.828 6.784-14.291 15.059l0.681 10.498c0.534 8.232 7.802 14.954 16.153 14.954h641.472c8.35 0 15.37-6.722 15.598-14.954z m8.739 81.304l0.296-10.264c0.233-8.091-6.628-14.724-15.248-14.724H177.735c-8.62 0-15.226 6.633-14.681 14.724l0.691 10.264c0.542 8.049 7.999 14.622 16.571 14.622H838.84c8.574 0 15.777-6.572 16.009-14.622z m6.172 79.506l0.298-10.038c0.235-7.912-6.747-14.399-15.516-14.399H172.234c-8.769 0-15.494 6.487-14.945 14.399l0.695 10.038c0.545 7.872 8.126 14.3 16.847 14.3h669.91c8.721 0 16.047-6.428 16.28-14.3z m-14.901 77.765l0.282-9.819c0.222-7.74-6.466-14.085-14.863-14.085H186.526c-8.397 0-14.841 6.345-14.322 14.085l0.659 9.819c0.517 7.701 7.772 13.989 16.123 13.989h641.548c8.351 0 15.365-6.288 15.586-13.989z m-8.749 76.081l0.267-9.608c0.21-7.573-6.189-13.781-14.222-13.781H206.385c-8.033 0-14.202 6.208-13.711 13.781l0.623 9.608c0.489 7.535 7.425 13.688 15.415 13.688h613.751c7.99 0.001 14.698-6.152 14.908-13.688z m1.869-378.856l36.038-94.167 21.623-119.775H785.183L752.749 356.56l-118.926 82.358H839.24z" fill="#ff4d4f"/>
+                                                </g>
+                                            </svg>
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- Left Blinker -->
+                                    <div class="meta-blinker meta-blinker-left" id="metaBlinkerLeft">
+                                        <svg viewBox="0 0 48 48" width="18" height="18">
+                                            <path class="blinker-outline" d="M20 8 L6 24 L20 40 L20 30 L42 30 L42 18 L20 18 Z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+                                            <path class="blinker-fill" d="M20 8 L6 24 L20 40 L20 30 L42 30 L42 18 L20 18 Z" fill="#52c41a" stroke="none" opacity="0"/>
+                                        </svg>
+                                    </div>
+                                    
+                                    <!-- Center: Speed -->
+                                    <div class="meta-speed-container">
+                                        <span class="meta-speed-value" id="metaSpeed">0</span>
+                                        <span class="meta-speed-unit">km/h</span>
+                                    </div>
+                                    
+                                    <!-- Right Blinker -->
+                                    <div class="meta-blinker meta-blinker-right" id="metaBlinkerRight">
+                                        <svg viewBox="0 0 48 48" width="18" height="18">
+                                            <path class="blinker-outline" d="M28 8 L42 24 L28 40 L28 30 L6 30 L6 18 L28 18 Z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+                                            <path class="blinker-fill" d="M28 8 L42 24 L28 40 L28 30 L6 30 L6 18 L28 18 Z" fill="#52c41a" stroke="none" opacity="0"/>
+                                        </svg>
+                                    </div>
+                                    
+                                    <!-- Right Column: Steering + Accelerator -->
+                                    <div class="meta-right-col">
+                                        <div class="meta-steering-container" id="metaSteeringContainer">
+                                            <svg class="meta-steering-icon" id="metaSteeringIcon" viewBox="0 0 64 64" width="18" height="18">
+                                                <!-- Outer ring -->
+                                                <circle cx="32" cy="32" r="28" fill="none" stroke="rgba(255,255,255,0.9)" stroke-width="5"/>
+                                                <!-- Inner hub circle -->
+                                                <circle cx="32" cy="32" r="9" fill="rgba(255,255,255,0.9)"/>
+                                                <!-- Three spokes -->
+                                                <!-- Left spoke -->
+                                                <rect x="4" y="28" width="19" height="8" rx="2" fill="rgba(255,255,255,0.9)"/>
+                                                <!-- Right spoke -->
+                                                <rect x="41" y="28" width="19" height="8" rx="2" fill="rgba(255,255,255,0.9)"/>
+                                                <!-- Bottom spoke -->
+                                                <rect x="28" y="41" width="8" height="19" rx="2" fill="rgba(255,255,255,0.9)"/>
+                                            </svg>
+                                            <span class="meta-steering-value" id="metaSteering">0°</span>
+                                        </div>
+                                        <div class="meta-accelerator-container">
+                                            <svg class="meta-accelerator-icon" id="metaAcceleratorIcon" viewBox="0 0 32 32" width="22" height="22">
+                                                <!-- Base gray pedal (always visible) -->
+                                                <rect x="8" y="4" width="16" height="24" rx="3" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="2"/>
+                                                <!-- Lightning bolt icon -->
+                                                <path d="M18 8 L13 16 L16 16 L14 24 L19 15 L16 15 L18 8 Z" fill="rgba(255,255,255,0.4)"/>
+                                                <!-- Active fill overlay - grows from bottom -->
+                                                <rect id="accelFillRect" x="10" y="26" width="12" height="0" rx="2" fill="#73d13d" opacity="0"/>
+                                            </svg>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- Secondary Info Row -->
+                                <div class="metadata-secondary">
+                                    <div class="metadata-item">
+                                        <span class="metadata-label" data-i18n="autopilot">自动驾驶</span>
+                                        <span class="metadata-value" id="metaAutopilot">--</span>
+                                    </div>
+                                    <div class="metadata-item">
+                                        <span class="metadata-label" data-i18n="gps">GPS</span>
+                                        <span class="metadata-value" id="metaGPS">--</span>
+                                    </div>
+                                    <div class="metadata-item">
+                                        <span class="metadata-label" data-i18n="heading">航向</span>
+                                        <span class="metadata-value" id="metaHeading">--</span>
+                                    </div>
+                                    <div class="metadata-item">
+                                        <span class="metadata-label" data-i18n="acceleration">加速度</span>
+                                        <span class="metadata-value" id="metaAcceleration">--</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- R66: sideways the grid has no letterband, so this card is always on top of
+                         a feed. Folded it keeps only 档位 and 车速 — the two numbers you actually
+                         glance at — and the rest of the tile goes back to the video. A direct child
+                         of the panel rather than of `.metadata-content`, because that box scrolls
+                         its row sideways and an edge tab must not be clipped by it. Touch-only:
+                         the stylesheet hides the button everywhere else and desktop keeps its card. -->
+                    <button type="button" id="metaFoldBtn" class="metadata-fold" aria-expanded="true"
+                        aria-label="收起行车数据">▾</button>
+                </div>
+
+                <div id="videoControlsOverlay" class="video-controls-overlay">
+                    <div class="video-controls-container">
+                        <!-- Seeking is reachable on the slider below; the curve is the picture of it. -->
+                        <div id="speedGraphContainer" class="speed-graph-container" aria-hidden="true">
+                            <canvas id="speedGraphCanvas" class="speed-graph-canvas"></canvas>
+                        </div>
+                        <div id="progressContainer" class="progress-container" role="slider"
+                             aria-label="播放进度" data-i18n-aria="ariaPlayProgress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                            <div class="progress-track">
+                                <div id="progressPlayed" class="progress-played"></div>
+                                <div id="clipSelection" class="clip-selection"></div>
+                            </div>
+                            <div id="progressHandle" class="progress-handle"></div>
+                            <div id="clipStartHandle" class="clip-handle clip-start-handle"></div>
+                            <div id="clipEndHandle" class="clip-handle clip-end-handle"></div>
+                            <div id="timePreview" class="time-preview">
+                                <div class="time-preview-time">00:00</div>
+                            </div>
+                        </div>
+                        <div class="controls-section-wrapper">
+                            <div class="controls-section">
+                                <div class="controls-left">
+                                    <!-- R96: switching events was a horizontal swipe over the picture and
+                                         nothing else — no affordance, and on a phone the swipe loses to
+                                         anything else the thumb does. Same two actions, made visible.
+                                         Hidden on a desk (`.event-step-btn` in styles.css).
+                                         The two pairs share this row and only one pair shows at a time:
+                                         measured at 412 px, five buttons plus the clock overflowed to
+                                         451 px and pushed 剪辑/倍速 off the screen while paused. So the
+                                         frame pair sits in the two slots nearest play and the event pair
+                                         in the outer two, and pausing swaps them (styles.css) — the play
+                                         button never moves. -->
+                                    <button id="prevEventBtn" class="control-btn event-step-btn" title="上一个事件"
+                                            aria-label="上一个事件">
+                                        <span class="btn-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6M7 5v14"/></svg></span>
+                                    </button>
+                                    <!-- R96: ±1 帧 was reachable only by double-tapping a paused picture,
+                                         which is a gesture for people who already know it exists. -->
+                                    <button id="prevFrameBtn" class="control-btn frame-step-btn" title="上一帧"
+                                            aria-label="上一帧">
+                                        <span class="btn-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M13 6l-6 6 6 6M19 5v14"/></svg></span>
+                                    </button>
+                                    <button id="playPauseBtn" class="control-btn">
+                                        <img id="playPauseIcon" src="assets/icons/play.svg" alt="播放">
+                                    </button>
+                                    <button id="nextFrameBtn" class="control-btn frame-step-btn" title="下一帧"
+                                            aria-label="下一帧">
+                                        <span class="btn-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M11 6l6 6-6 6M5 5v14"/></svg></span>
+                                    </button>
+                                    <button id="nextEventBtn" class="control-btn event-step-btn" title="下一个事件"
+                                            aria-label="下一个事件">
+                                        <span class="btn-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6M17 5v14"/></svg></span>
+                                    </button>
+                                    <div id="videoTimeDisplay" class="video-time-display">00:00 / --:--</div>
+                                </div>
+                                <div id="viewSwitcher" class="view-switcher">
+                                <button class="view-btn" data-view="grid">
+                                    <div class="view-icon grid-icon"></div>
+                                    <span data-i18n="grid6">6-Grid</span>
+                                </button>
+                                <button class="view-btn" data-view="grid4">
+                                    <div class="view-icon grid4-icon"></div>
+                                    <span data-i18n="grid4">4-Grid</span>
+                                </button>
+                                <button class="view-btn" data-view="legacy">
+                                    <div class="view-icon legacy-icon"></div>
+                                    <span data-i18n="legacy">PIP</span>
+                                </button>
+                                <div class="vs-separator"></div>
+                                <button class="view-btn active" data-view="front">
+                                    <div class="view-icon front-icon"></div>
+                                    <span data-i18n="front">Front</span>
+                                </button>
+                                <button class="view-btn" data-view="back">
+                                    <div class="view-icon back-icon"></div>
+                                    <span data-i18n="back">Rear</span>
+                                </button>
+                                <button class="view-btn" data-view="left">
+                                    <div class="view-icon left-icon"></div>
+                                    <span data-i18n="left">Left</span>
+                                </button>
+                                <button class="view-btn" data-view="right">
+                                    <div class="view-icon right-icon"></div>
+                                    <span data-i18n="right">Right</span>
+                                </button>
+                                <button class="view-btn" data-view="left_pillar">
+                                    <div class="view-icon left-pillar-icon"></div>
+                                    <span data-i18n="leftPillar">Left Pillar</span>
+                                </button>
+                                <button class="view-btn" data-view="right_pillar">
+                                    <div class="view-icon right-pillar-icon"></div>
+                                    <span data-i18n="rightPillar">Right Pillar</span>
+                                </button>
+                            </div>
+                            <div class="controls-right">
+                                <button id="fullscreenBtn" class="control-btn fullscreen-btn" title="全屏" aria-pressed="false" disabled>
+                                    <svg class="fs-expand" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="20" height="20">
+                                        <path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                    </svg>
+                                    <svg class="fs-collapse" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="20" height="20">
+                                        <path d="M9 4v5H4M20 9h-5V4M4 15h5v5M15 20v-5h5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                    </svg>
+                                </button>
+                                <button id="clipBtn" class="control-btn clip-btn" title="剪辑视频" disabled>
+                                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="20" height="20">
+                                        <circle cx="6" cy="6" r="2" stroke="currentColor" stroke-width="2"/>
+                                        <circle cx="6" cy="18" r="2" stroke="currentColor" stroke-width="2"/>
+                                        <path d="M20 4L8.12 15.88M14.47 14.48L20 20M8.12 8.12L12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                    </svg>
+                                </button>
+                                <button id="confirmClipBtn" class="control-btn confirm-clip-btn" title="确认剪辑范围" style="display: none;">
+                                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="20" height="20">
+                                        <path d="M5 13l4 4L19 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                    </svg>
+                                </button>
+                                <div id="speedControl" class="speed-control">
+                                    <button id="speedBtn" class="control-btn speed-btn">1x</button>
+                                    <div class="speed-options">
+                                        <div data-speed="8.0">8.0x</div>
+                                        <div data-speed="4.0">4.0x</div>
+                                        <div data-speed="2.0">2.0x</div>
+                                        <div data-speed="1.5">1.5x</div>
+                                        <div data-speed="1.0" class="active">1.0x</div>
+                                        <div data-speed="0.5">0.5x</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+        <div id="overlay" class="overlay"></div>
+        <!-- R172: the landscape date picker is a centred overlay, so it needs the dim behind it and
+             the tap-through that closes it. Styles only give it a box in the landscape phone tier;
+             elsewhere the element stays display:none and takes no clicks. -->
+        <div id="pickerScrim" class="picker-scrim" aria-hidden="true"></div>
+    </div>
+
+    <!-- Map Selection Modal -->
+    <div id="mapModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <h4 id="mapModalTitle">在地图上查看</h4>
+            <!-- The track is drawn locally instead of asked of a tile server: a clip is a closed
+                 piece of driving, the phone often has no bars over it, and the colour of the line
+                 is the answer to 「这段路是谁在开」. Touch layouts only — see styles.css. -->
+            <div class="route-map-group">
+                <span class="route-map-title" data-i18n="routeMapTitle">这段录像的轨迹</span>
+                <canvas id="routeMapCanvas" class="route-map-canvas" width="600" height="340"></canvas>
+                <div class="route-note" id="routeNote" style="display: none;"></div>
+                <div class="route-legend" id="routeLegend"></div>
+            </div>
+            <div class="modal-buttons">
+                <button id="gaodeMapBtn" class="map-btn gaode"></button>
+                <button id="googleMapBtn" class="map-btn google"></button>
+            </div>
+            <button id="closeModalBtn" class="close-modal-btn">&times;</button>
+        </div>
+    </div>
+
+    <!-- Android Folder Browser: the dialog plugin has no mobile build and no folder
+         picker, so directory selection is done through tauri-plugin-fs instead. -->
+    <div id="androidDirModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content dir-modal-content" role="dialog" aria-modal="true" aria-labelledby="androidDirModalTitle">
+            <h4 id="androidDirModalTitle">选择 TeslaCam 目录</h4>
+            <div class="dir-path-row">
+                <!-- 触屏上这一行不是「路径输入框 + 进入 + 上一级」，而是「我在哪儿 + 怎么上去」：
+                     路径框、进入、路径标签在手机上收进「手动输入路径」后面（见 styles.css 的手机档），
+                     剩下 上一级 按钮和下面这个人话位置条。桌面版走原生对话框，永远看不到这一行。 -->
+                <span class="dir-where" id="androidDirWhere">
+                    <strong id="androidDirWhereName">本机存储</strong>
+                    <small id="androidDirWherePath"></small>
+                </span>
+                <span id="androidDirPathLabel" class="dir-path-label">路径</span>
+                <input type="text" id="androidDirPathInput" class="dir-path-input" spellcheck="false" autocomplete="off">
+                <button type="button" id="androidDirGoBtn" class="dir-action-btn">进入</button>
+                <button type="button" id="androidDirUpBtn" class="dir-action-btn">上一级</button>
+                <button type="button" id="androidDirPathEdit" class="dir-quiet-link">手动输入路径</button>
+            </div>
+            <div class="dir-volume-row" id="androidDirVolumes" style="display: none;">
+                <span class="dir-volume-label" id="androidDirVolumesLabel">存储位置</span>
+                <div class="dir-volume-chips" id="androidDirVolumeChips"></div>
+            </div>
+            <p class="dir-volume-warn" id="androidDirVolumeWarn" style="display: none;"></p>
+            <!-- 外接盘读不到，十有八九是 OTG 供电或者进错了目录层，这两样报错都帮不上。
+                 所以第一次看见外部存储时把两步摆出来，之后可以收起，并随时从「关于」再打开。 -->
+            <div id="usbGuide" class="usb-guide" style="display: none;">
+                <div class="usb-guide-head">
+                    <strong class="usb-guide-title" id="usbGuideTitle"></strong>
+                    <button type="button" id="usbGuideDismiss" class="usb-guide-dismiss"></button>
+                </div>
+                <ol class="usb-guide-steps" id="usbGuideSteps"></ol>
+                <p class="usb-guide-oem" id="usbGuideOem"></p>
+                <p class="usb-guide-eject" id="usbGuideEject"></p>
+            </div>
+            <div id="androidDirHint" class="dir-browser-hint" style="display: none;">
+                <strong id="androidDirHintTitle"></strong>
+                <p id="androidDirHintBody"></p>
+                <p id="androidDirHintSteps" class="dir-browser-steps"></p>
+                <button type="button" id="androidDirHintSettings" class="perm-settings-btn"></button>
+                <p id="androidDirHintApp" class="dir-browser-steps"></p>
+                <!-- 报错原文（`os error 2` 那一串）是给修的人看的，不是给选目录的人看的，
+                     所以手机上默认收起，「详情」里再给。 -->
+                <button type="button" id="androidDirHintDetails" class="dir-quiet-link">详情</button>
+                <p id="androidDirHintError" class="dir-browser-error"></p>
+            </div>
+            <div id="androidDirList" class="dir-browser-list"></div>
+            <!-- No shortcut to the app's private folder: nothing writes there on its own, and the few
+                 people who filled it by hand can still type the path in. -->
+            <div class="modal-buttons">
+                <button type="button" id="androidDirSelectBtn">选择此文件夹</button>
+            </div>
+            <button type="button" id="androidDirCloseBtn" class="close-modal-btn">&times;</button>
+        </div>
+    </div>
+
+    <!-- About: version, upstream link, feedback contact and the reward code, in one place a
+         screenshot can carry to whoever asks "which build is this?". -->
+    <div id="aboutModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content about-panel" role="dialog" aria-modal="true" aria-labelledby="aboutModalTitle">
+            <h4 id="aboutModalTitle">关于特写</h4>
+            <!-- The Tesla link lives here rather than in the app name: a descriptive subtitle is
+                 nominative use, a brand in the launcher label is the thing stores reject. -->
+            <p class="about-tagline" id="aboutTagline">特斯拉行车记录 · 六路同播</p>
+            <img src="logo.png" alt="" class="about-logo">
+            <p class="about-version" id="aboutVersion">v—</p>
+
+            <dl class="about-facts">
+                <div class="about-fact">
+                    <dt id="aboutDeviceLabel">本机</dt>
+                    <dd id="aboutDeviceValue">—</dd>
+                </div>
+            </dl>
+
+            <button type="button" id="aboutGithubBtn" class="about-row about-row-link">
+                <span class="about-row-label" id="aboutGithubLabel" data-i18n="aboutGithub">上游项目（GitHub）</span>
+                <span class="about-row-value">github.com/DeaglePC/TDashcamStudio</span>
+            </button>
+
+            <button type="button" id="aboutUsbGuideBtn" class="about-row about-row-link">
+                <span class="about-row-label" id="aboutUsbGuideLabel" data-i18n="aboutUsbGuide">U 盘读取指南</span>
+                <span class="about-row-value" id="aboutUsbGuideHint" data-i18n="aboutUsbGuideHint">插盘读不到时看这里</span>
+            </button>
+
+            <div class="about-row">
+                <span class="about-row-label" id="aboutFeedbackText" data-i18n="aboutFeedback">反馈 bug / 建议：GitHub Issues</span>
+                <button type="button" id="aboutCopyContactBtn" class="dir-action-btn" data-i18n="aboutCopyContact">打开 Issues</button>
+            </div>
+
+            <div class="about-donate">
+                <p class="about-donate-title" id="aboutDonateTitle" data-i18n="aboutDonate">觉得好用的话，请我一杯咖啡</p>
+                <button type="button" id="aboutQrBtn" class="about-qr-btn" aria-pressed="false">
+                    <img src="imgs/donate-qr.jpg" alt="" class="about-qr" id="aboutQrImg">
+                </button>
+                <p class="about-note" id="aboutDonateNote" data-i18n="aboutDonateNote">点一下可放大，用微信「扫一扫」对着本屏即可。</p>
+            </div>
+
+            <p class="about-license" id="aboutLicenseNote" data-i18n="aboutLicenseNote">免费开源软件，基于桌面版 TDashcamStudio（AGPL-3.0）移植。</p>
+            <button type="button" id="aboutCloseBtn" class="close-modal-btn">&times;</button>
+        </div>
+    </div>
+
+    <!-- R63-7: a list of what the fingers can do on the picture. Gestures are invisible by design,
+         which is exactly why one named place has to spell them out — and why this one is a plain
+         two-column list rather than prose: you scan it once, then never need it again. -->
+    <div id="gestureModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content gesture-panel" role="dialog" aria-modal="true" aria-labelledby="gestureModalTitle">
+            <h4 id="gestureModalTitle" data-i18n="gestureHelp">手势说明</h4>
+
+            <div class="gesture-group" data-i18n="gestureGroupSeek">播放进度</div>
+            <div class="gesture-row">
+                <span class="gesture-key" data-i18n="gTapLeft">双击画面左 1/3</span>
+                <span class="gesture-value" data-i18n="gTapLeftValue">后退 10 秒；暂停时逐帧</span>
+            </div>
+            <div class="gesture-row">
+                <span class="gesture-key" data-i18n="gTapRight">双击画面右 1/3</span>
+                <span class="gesture-value" data-i18n="gTapRightValue">前进 10 秒；暂停时逐帧</span>
+            </div>
+            <div class="gesture-row">
+                <span class="gesture-key" data-i18n="gFineScrub">拖进度条时把手指抬离条面</span>
+                <span class="gesture-value" data-i18n="gFineScrubValue">精细微调：一格顶原来八格</span>
+            </div>
+
+            <div class="gesture-group" data-i18n="gestureGroupCamera">相机与画面</div>
+            <div class="gesture-row">
+                <span class="gesture-key" data-i18n="gTapCentre">双击画面中间</span>
+                <span class="gesture-value" data-i18n="gTapCentreValue">切到下一路相机</span>
+            </div>
+            <div class="gesture-row">
+                <span class="gesture-key" data-i18n="gSwipeSide">画面右侧上滑 / 下滑</span>
+                <span class="gesture-value" data-i18n="gSwipeSideValue">上一路 / 下一路相机</span>
+            </div>
+            <div class="gesture-row">
+                <span class="gesture-key" data-i18n="gPinch">双指捏合 / 张开</span>
+                <span class="gesture-value" data-i18n="gPinchValue">放大那一路；放大后单指可平移</span>
+            </div>
+            <div class="gesture-row">
+                <span class="gesture-key" data-i18n="gTwoTap">双指轻点两下</span>
+                <span class="gesture-value" data-i18n="gTwoTapValue">缩放归位 1×</span>
+            </div>
+            <div class="gesture-row">
+                <span class="gesture-key" data-i18n="gDragLeftSide">画面左 1/3 上下拖</span>
+                <span class="gesture-value" data-i18n="gDragLeftSideValue">调亮度</span>
+            </div>
+            <div class="gesture-row">
+                <span class="gesture-key" data-i18n="gHold">长按画面</span>
+                <span class="gesture-value" data-i18n="gHoldValue">3 倍速，松手恢复</span>
+            </div>
+            <div class="gesture-row">
+                <span class="gesture-key" data-i18n="gFling">画面快速左右滑</span>
+                <span class="gesture-value" data-i18n="gFlingValue">上一个 / 下一个事件</span>
+            </div>
+
+            <div class="gesture-group" data-i18n="gestureGroupClip">剪辑</div>
+            <div class="gesture-row">
+                <span class="gesture-key" data-i18n="gStripDrag">在胶片条上横划一道</span>
+                <span class="gesture-value" data-i18n="gStripDragValue">一次选定剪辑起止</span>
+            </div>
+
+            <p class="gesture-note" data-i18n="gestureFootnote">双击分区与上下滑只在单路画面生效；宫格里双击是放大那一路。</p>
+
+            <button type="button" id="gestureCloseBtn" class="close-modal-btn">&times;</button>
+        </div>
+    </div>
+
+    <!-- Clip Export Modal -->
+    <div id="clipModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content clip-modal" role="dialog" aria-modal="true" aria-labelledby="clipModalTitle">
+            <h4 id="clipModalTitle">导出视频片段</h4>
+            <div id="clipInfo" class="clip-info">
+                <div class="clip-info-item">
+                    <span class="clip-info-label">选中时长:</span>
+                    <span id="clipDuration">00:00</span>
+                </div>
+                <div class="clip-info-item">
+                    <span class="clip-info-label">起始时间:</span>
+                    <span id="clipStartTime">--:--:--</span>
+                </div>
+                <div class="clip-info-item">
+                    <span class="clip-info-label">结束时间:</span>
+                    <span id="clipEndTime">--:--:--</span>
+                </div>
+            </div>
+            <div id="clipOptions" class="clip-options">
+                <div class="clip-option-group">
+                    <label id="selectCamerasLabel">选择摄像头:</label>
+                    <div class="camera-checkboxes">
+                        <label><input type="checkbox" id="exportFront" checked> <span data-i18n="front">前</span></label>
+                        <label><input type="checkbox" id="exportBack"> <span data-i18n="back">后</span></label>
+                        <label><input type="checkbox" id="exportLeft"> <span data-i18n="left">左</span></label>
+                        <label><input type="checkbox" id="exportRight"> <span data-i18n="right">右</span></label>
+                        <label><input type="checkbox" id="exportLeftPillar"> <span data-i18n="leftPillar">左柱</span></label>
+                        <label><input type="checkbox" id="exportRightPillar"> <span data-i18n="rightPillar">右柱</span></label>
+                    </div>
+                </div>
+                <div class="clip-option-row">
+                    <label class="clip-checkbox-label"><input type="checkbox" id="addTimestamp" checked> <span id="addTimestampLabel">添加时间水印</span></label>
+                    <label class="clip-checkbox-label"><input type="checkbox" id="addMetadata"> <span id="addMetadataLabel">添加行驶数据</span></label>
+                </div>
+                <div class="clip-option-row">
+                    <label class="clip-checkbox-label"><input type="checkbox" id="mergeVideos"> <span id="mergeVideosLabel">合成四宫格视频</span></label>
+                </div>
+                <div class="clip-option-row" id="ffmpegOptionRow" style="margin-top: 8px; display: none;">
+                     <label class="clip-checkbox-label" title="使用本地 FFmpeg 极速导出（需要系统已安装 FFmpeg）"><input type="checkbox" id="useLocalFFmpeg" checked> <span id="useLocalFFmpegLabel">使用 FFmpeg 极速导出</span></label>
+                </div>
+            </div>
+            <div id="clipProgress" class="clip-progress" style="display: none;">
+                <div class="progress-bar">
+                    <div id="clipProgressBar" class="progress-bar-fill" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-labelledby="clipProgressText"></div>
+                </div>
+                <div id="clipProgressText" class="progress-text">准备中...</div>
+            </div>
+            <div id="downloadButtons" class="download-buttons" style="display: none;">
+                <!-- Buttons will be injected here -->
+            </div>
+            <div class="modal-buttons">
+                <button id="startClipBtn" class="map-btn gaode">开始导出</button>
+                <button id="cancelClipBtn" class="map-btn" style="background-color: #6c757d;">取消</button>
+            </div>
+            <button id="closeClipModalBtn" class="close-modal-btn">&times;</button>
+        </div>
+    </div>
+
+    <!-- File Path Modal -->
+    <div id="filePathModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content file-path-modal" role="dialog" aria-modal="true" aria-labelledby="filePathModalTitle">
+            <h4 id="filePathModalTitle">当前视频文件路径</h4>
+            <div class="file-path-container">
+                <!-- One line of a 90-char TeslaCam path is about a fifth of it, and an <input>
+                     cannot show more than that. `rows="1"` keeps the desktop rendering; the touch
+                     tiers wrap it and script.js grows the box to fit. -->
+                <textarea id="filePathInput" class="file-path-input" rows="1" readonly></textarea>
+                <button id="copyPathBtn" class="copy-path-btn" title="复制路径" aria-label="复制路径" data-i18n-aria="ariaCopyPath">
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="18" height="18">
+                        <rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" stroke-width="2"/>
+                        <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" stroke="currentColor" stroke-width="2"/>
+                    </svg>
+                </button>
+            </div>
+            <div id="copySuccessHint" class="copy-success-hint">已复制到剪贴板</div>
+            <button id="closeFilePathModalBtn" class="close-modal-btn">&times;</button>
+        </div>
+    </div>
+
+    <!-- 删除单个事件。这是硬删除，卡上没有回收站，所以弹窗把要消失的文件逐条列出来，
+         点「删除」之前用户看得见自己签的是什么。 -->
+    <div id="deleteConfirmModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content delete-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="deleteConfirmTitle">
+            <h4 id="deleteConfirmTitle"></h4>
+            <div class="delete-confirm-summary" id="deleteConfirmSummary"></div>
+            <ul class="delete-confirm-list" id="deleteConfirmList"></ul>
+            <div class="delete-confirm-warn" id="deleteConfirmWarn"></div>
+            <div class="delete-confirm-actions">
+                <button type="button" id="deleteCancelBtn" class="btn-secondary"></button>
+                <button type="button" id="deleteConfirmBtn" class="btn-danger"></button>
+            </div>
+            <button id="closeDeleteConfirmBtn" class="close-modal-btn">&times;</button>
+        </div>
+    </div>
+
+    <!-- Metadata Detail Overlay (YouTube Stats style) -->
+    <div id="metaDetailOverlay" class="stats-overlay">
+        <div class="stats-header">
+            <span class="stats-title" id="statsTitle">Drive Stats</span>
+            <!-- Touch only: sideways there is no black band for a ten-row table to sit in, so the
+                 card has to be able to stop being one for a moment. See styles.css `.stats-fold`. -->
+            <button id="foldStatsBtn" class="stats-fold" aria-label="收起数据卡">▾</button>
+            <button id="closeStatsBtn" class="stats-close">[X]</button>
+        </div>
+        <div class="stats-content">
+            <div class="stats-row">
+                <span class="stats-label" data-i18n="speed">Speed</span>
+                <span class="stats-value" id="statsSpeed">--</span>
+            </div>
+            <div class="stats-row">
+                <span class="stats-label" data-i18n="gear">Gear</span>
+                <span class="stats-value" id="statsGear">--</span>
+            </div>
+            <div class="stats-row">
+                <span class="stats-label" data-i18n="steering">Steering</span>
+                <span class="stats-value" id="statsSteering">--</span>
+            </div>
+            <div class="stats-row">
+                <span class="stats-label" data-i18n="accelerator">Accelerator</span>
+                <span class="stats-value" id="statsAccelerator">--</span>
+            </div>
+            <div class="stats-row">
+                <span class="stats-label" data-i18n="brake">Brake</span>
+                <span class="stats-value" id="statsBrake">--</span>
+            </div>
+            <div class="stats-row">
+                <span class="stats-label" data-i18n="blinker">Blinker</span>
+                <span class="stats-value" id="statsBlinker">--</span>
+            </div>
+            <div class="stats-row">
+                <span class="stats-label" data-i18n="autopilot">Autopilot</span>
+                <span class="stats-value" id="statsAutopilot">--</span>
+            </div>
+            <div class="stats-row">
+                <span class="stats-label" data-i18n="gps">GPS</span>
+                <span class="stats-value" id="statsGPS">--</span>
+            </div>
+            <div class="stats-row">
+                <span class="stats-label" data-i18n="heading">Heading</span>
+                <span class="stats-value" id="statsHeading">--</span>
+            </div>
+            <div class="stats-row">
+                <span class="stats-label" data-i18n="acceleration">Acceleration</span>
+                <span class="stats-value" id="statsAccel">--</span>
+            </div>
+        </div>
+        <!-- The phone-only corner grip: the plate's size is the only thing that makes it fit a
+             black band, and the band is different for every layout. -->
+        <div id="statsResizeHandle" class="stats-resize" aria-label="调整大小" data-i18n-aria="ariaResize" role="separator"></div>
+    </div>
+
+    <!-- Phone one-hand controls: the primary actions lived in the top corners, out of thumb
+         reach. Only displayed by the phone media query, so desktop never sees it.
+         An action bar, not a tab bar: every button here fires something. R58 removed the fourth
+         one (播放) because it had no reachable action left — the bar is faded out for as long as
+         the drawer covers the picture, so "go back to the picture" could never be tapped — and
+         with it went the idea of a tab that marks where you are. The two layer tabs still light
+         while their layer owns the screen (see syncTabSelection), which is visible on the ⋮ panel
+         and, for ~200ms, on the drawer as the bar fades. -->
+    <nav id="phoneActionBar" class="phone-action-bar" aria-label="主操作" data-i18n-aria="ariaMainActions">
+        <button type="button" id="tabListBtn" class="tab-btn" aria-label="片段" data-action="list">
+            <span class="tab-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 5v14M16 5v14M4 9.5h4M4 14.5h4M16 9.5h4M16 14.5h4"/></svg></span>
+            <span class="tab-label" data-i18n="tabClips">片段</span>
+        </button>
+        <button type="button" id="tabLayoutBtn" class="tab-btn" aria-label="视图" data-action="layout">
+            <span class="tab-icon"><svg viewBox="0 0 24 24"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg></span>
+            <span class="tab-label" id="tabLayoutLabel" data-i18n="tabLayout">视图</span>
+        </button>
+        <button type="button" id="tabMoreBtn" class="tab-btn" aria-label="设置" data-action="more">
+            <span class="tab-icon"><svg viewBox="0 0 24 24"><path d="M4 8h5M13 8h7M4 16h9M17 16h3"/><circle cx="11" cy="8" r="2.2"/><circle cx="15" cy="16" r="2.2"/></svg></span>
+            <span class="tab-label" data-i18n="tabSettings">设置</span>
+        </button>
+    </nav>
+
+    <!-- A clip keeps encoding when the sheet is closed, so the app needs one thing that says so:
+         without it the export is invisible inside its own UI and the only way to check on it is to
+         pull the notification shade down. Sits above the tab bar and taps back into the sheet. -->
+    <button type="button" id="exportPill" class="export-pill">
+        <span class="export-pill-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v10M8 9l4 4 4-4M4 19h16"/></svg></span>
+        <span class="export-pill-text" id="exportPillText"></span>
+    </button>
+
+    <!-- Long-press on an event card: the actions that used to be buried in the ⋮ menu,
+         aimed at the item the user is actually holding. -->
+    <div id="cardContextMenu" class="card-context-menu" role="menu" aria-modal="true">
+        <div class="context-title" id="cardContextTitle"></div>
+        <button type="button" class="context-item" data-context="play" role="menuitem">
+            <span class="context-icon"><svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></svg></span><span data-i18n="contextPlay">播放事件</span>
+        </button>
+        <button type="button" class="context-item" data-context="single" role="menuitem">
+            <span class="context-icon"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></span><span data-i18n="contextSingle">单路全屏</span>
+        </button>
+        <button type="button" class="context-item" data-context="star" role="menuitem">
+            <span class="context-icon"><svg viewBox="0 0 24 24"><path d="M12 3.6l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg></span><span id="contextStarLabel" data-i18n="contextStar">收藏</span>
+        </button>
+        <button type="button" class="context-item" data-context="path" role="menuitem">
+            <span class="context-icon"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v9a1 1 0 01-1 1H4a1 1 0 01-1-1V7z"/></svg></span><span data-i18n="contextPath">显示路径</span>
+        </button>
+        <button type="button" class="context-item" data-context="meta" role="menuitem">
+            <span class="context-icon"><svg viewBox="0 0 24 24"><path d="M4 5v14h16M8 15l3-4 3 2 4-6"/></svg></span><span data-i18n="contextMeta">元数据</span>
+        </button>
+        <!-- Takes the place of the address link in the list row, which is not a tap target on
+             touch. Hidden by showCardContextMenu when the event has no GPS fix. -->
+        <button type="button" class="context-item" data-context="place" role="menuitem">
+            <span class="context-icon"><svg viewBox="0 0 24 24"><path d="M12 21s7-6.1 7-11a7 7 0 10-14 0c0 4.9 7 11 7 11z"/><circle cx="12" cy="10" r="2.5"/></svg></span><span data-i18n="contextPlace">查看位置</span>
+        </button>
+        <!-- Only on Android: the desktop keeps its own delete in the file manager. Harmless
+             markup otherwise — the row is hidden by the touch stylesheet and the action is
+             gated on the native bridge. -->
+        <button type="button" class="context-item context-item-danger" data-context="delete" role="menuitem">
+            <span class="context-icon"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></svg></span><span data-i18n="contextDelete">删除事件</span>
+        </button>
+    </div>
+
+    <!-- Phone clip export. The desktop modal drives an FFmpeg sidecar that never ships in the
+         mobile bundle, so this one hands the whole job to the native MediaCodec engine and only
+         picks views, size and range. Reuses .modal-overlay so the back button closes it like any
+         other sheet. -->
+    <div id="phoneExportModal" class="modal-overlay phone-export-sheet phone-export-page" style="display: none;">
+        <div class="modal-content phone-export-panel" role="dialog" aria-modal="true" aria-labelledby="phoneExportTitle">
+            <!-- R88: a page, not a card. It stays a `.modal-overlay` on purpose — the back gesture
+                 counts `.modal-overlay.show` and the progress paths re-render only while it is shown,
+                 so the presentation changed and the plumbing did not. Still `.close-modal-btn` for the
+                 same reason: `closeTopLayer()` dismisses a layer by clicking that class. -->
+            <div class="pe-nav">
+                <button type="button" id="peCloseBtn" class="pe-nav-back close-modal-btn" aria-label="返回"
+                    data-i18n-aria="peBack">
+                    <svg viewBox="0 0 12 20" width="9" height="15" aria-hidden="true" fill="none" stroke="currentColor"
+                        stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2 2 10l8 8"/></svg>
+                    <span data-i18n="peBack">返回</span>
+                </button>
+                <h4 id="phoneExportTitle" class="pe-nav-title" data-i18n="exportClip">导出视频片段</h4>
+                <span class="pe-nav-tail">
+                    <button type="button" id="peCancelBtn" class="pe-nav-cancel" data-i18n="cancel">取消</button>
+                    <button type="button" id="peStartBtn" class="pe-nav-go" data-i18n="startExport">开始导出</button>
+                </span>
+            </div>
+            <div class="pe-seg" role="tablist" aria-label="导出设置" data-i18n-aria="ariaExportSettings">
+                <button type="button" role="tab" data-pane="view" aria-selected="true" aria-controls="pePaneView"
+                    data-i18n="pePaneView">画面</button>
+                <button type="button" role="tab" data-pane="over" aria-selected="false" aria-controls="pePaneOver"
+                    data-i18n="pePaneOver">叠加</button>
+                <button type="button" role="tab" data-pane="range" aria-selected="false" aria-controls="pePaneRange"
+                    data-i18n="pePaneRange">范围</button>
+            </div>
+            <!-- The summary and the progress bar answer for the whole page, not for one pane: which
+                 views, what size, how long, and how far the encode has got are true no matter which
+                 tab is open. -->
+            <div class="pe-summary" id="peSummary"></div>
+            <div class="pe-progress" id="peProgress" style="display: none;">
+                <div class="progress-bar"><div id="peProgressBar" class="progress-bar-fill" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-labelledby="peProgressText"></div></div>
+                <div class="progress-text" id="peProgressText"></div>
+            </div>
+            <div class="pe-body">
+                <div class="pe-pane" id="pePaneView" role="tabpanel">
+                <div class="pe-group">
+                    <span class="pe-label" data-i18n="peViews">画面</span>
+                    <div class="pe-chips" id="peCameraChips"></div>
+                </div>
+                <div class="pe-group">
+                    <span class="pe-label" data-i18n="peSize">分辨率</span>
+                    <div class="pe-chips" id="peSizeChips"></div>
+                </div>
+                <!-- R27-6: the exported composite used to be whatever the camera count implied.
+                     This is the same picture, and each view can be dragged and resized inside it.
+                     R29: the tiles carry the real opening frame of each view.
+                     R90: the composed preview moved out of here and into the dock pinned under the
+                     scroller, because it is the page's only live feedback — from a pane above it you
+                     cannot see what a watermark or a mosaic box does to the file. What stays is the
+                     editor, which needs two views to mean anything. -->
+                <div class="pe-group pe-layout-group">
+                    <span class="pe-label" data-i18n="peLayout">摆放</span>
+                    <div class="pe-canvas" id="peCanvas"></div>
+                    <div class="pe-layout-foot">
+                        <span class="pe-hint" id="peLayoutHint"></span>
+                        <button type="button" id="peLayoutResetBtn" class="pe-mini" data-i18n="peLayoutReset">恢复网格</button>
+                    </div>
+                </div>
+                </div>
+                <div class="pe-pane" id="pePaneOver" role="tabpanel">
+                <!-- R31-2: a clip that leaves the phone is a clip somebody else may watch. The mosaic
+                     boxes belong to one view's own picture rather than to the frame, so rearranging
+                     the views afterwards cannot uncover the plate they were drawn over.
+                     R88: three groups, because there are three different decisions here and the one
+                     label they used to share (「叠加」) said nothing about which of them a chip
+                     belonged to. The watermark's own content chips, then where it sits and how big. -->
+                <div class="pe-group pe-overlay-group">
+                    <span class="pe-label" data-i18n="peMosaicGroup">打码</span>
+                    <div class="pe-chips" id="peOverlayChips">
+                        <button type="button" class="recent-chip" data-overlay="mosaic" aria-pressed="false"
+                            data-i18n="peMosaic">隐私打码</button>
+                    </div>
+                    <div class="pe-mosaic" id="peMosaicEditor" style="display: none;">
+                        <div class="pe-chips pe-mosaic-cams" id="peMosaicCams"></div>
+                        <div class="pe-mosaic-canvas" id="peMosaicCanvas"></div>
+                        <div class="pe-mosaic-foot">
+                            <span class="pe-hint" id="peMosaicHint"></span>
+                            <button type="button" id="peMosaicClearBtn" class="pe-mini"
+                                data-i18n="peMosaicClear">清空本路</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="pe-group">
+                    <span class="pe-label" data-i18n="peWmGroup">水印</span>
+                    <div class="pe-chips pe-wm-content" id="peWmContentChips">
+                        <button type="button" class="recent-chip" data-overlay="stamp" aria-pressed="false"
+                            data-i18n="peBurnStamp">时间戳</button>
+                        <button type="button" class="recent-chip" data-overlay="hud" aria-pressed="false"
+                            data-i18n="peBurnHud">车速</button>
+                        <button type="button" class="recent-chip" data-overlay="bar" aria-pressed="false"
+                            data-i18n="peWmBar">车速条</button>
+                        <button type="button" class="recent-chip" data-overlay="state" aria-pressed="false"
+                            data-i18n="peWmState">行驶状态</button>
+                        <button type="button" class="recent-chip" data-overlay="gps" aria-pressed="false"
+                            data-i18n="peWmGps">GPS 位置</button>
+                        <button type="button" class="recent-chip" data-overlay="source" aria-pressed="false"
+                            data-i18n="peWmSource">溯源文件</button>
+                    </div>
+                    <div class="pe-wm-style" id="peWmStyle">
+                        <div class="pe-chips pe-wm-places" id="peWmPlaces"></div>
+                        <div class="pe-wm-size">
+                            <label class="pe-hint" for="peWmScale" data-i18n="peWmSize">字号</label>
+                            <input type="range" id="peWmScale" min="0.7" max="1.8" step="0.05" value="1"
+                                aria-describedby="peWmScaleOut">
+                            <output class="pe-hint pe-wm-scale-out" id="peWmScaleOut" for="peWmScale">1.0×</output>
+                        </div>
+                        <div class="pe-chips pe-wm-bgs" id="peWmBgChips"></div>
+                    </div>
+                </div>
+                <!-- Two marks that are not the watermark. The camera name answers 「哪一路是哪个」 —
+                     the desktop export has always burned it and the phone never did; the trigger
+                     outline answers 「哪几路当时触发了」 — no export ever did. Neither changes while the
+                     clip plays, so both go into one static bitmap beside the cells. -->
+                <div class="pe-group">
+                    <span class="pe-label" data-i18n="peChrome">画面标注</span>
+                    <div class="pe-chips" id="peChromeChips">
+                        <button type="button" class="recent-chip" data-overlay="label" aria-pressed="false"
+                            data-i18n="peChromeLabel">相机标签</button>
+                        <button type="button" class="recent-chip" data-overlay="badge" aria-pressed="false"
+                            data-i18n="peChromeBadge">触发角标</button>
+                    </div>
+                </div>
+                </div>
+                <div class="pe-pane" id="pePaneRange" role="tabpanel">
+                <div class="pe-group">
+                    <span class="pe-label" data-i18n="peRange">范围</span>
+                    <!-- Two rows, because one row made the steppers and the three action buttons wrap
+                         into a shape that changed with the language: the times are a pair, the
+                         buttons are three verbs that each need their own width. -->
+                    <div class="pe-range">
+                        <div class="pe-range-times">
+                            <span class="pe-side">
+                                <button type="button" class="pe-nudge" data-range="start" data-delta="-1" aria-label="-1s">−</button>
+                                <input type="text" id="peStartInput" class="pe-time" inputmode="numeric" placeholder="00:00" aria-label="起始" data-i18n-aria="ariaClipStart">
+                                <button type="button" class="pe-nudge" data-range="start" data-delta="1" aria-label="+1s">+</button>
+                            </span>
+                            <span class="pe-to">→</span>
+                            <span class="pe-side">
+                                <button type="button" class="pe-nudge" data-range="end" data-delta="-1" aria-label="-1s">−</button>
+                                <input type="text" id="peEndInput" class="pe-time" inputmode="numeric" placeholder="00:00" aria-label="结束" data-i18n-aria="ariaClipEnd">
+                                <button type="button" class="pe-nudge" data-range="end" data-delta="1" aria-label="+1s">+</button>
+                            </span>
+                        </div>
+                        <div class="pe-range-actions">
+                            <button type="button" id="peFromNowBtn" class="pe-mini" data-i18n="peFromNow">从当前进度</button>
+                            <!-- Trim in/out is the editor gesture the two handles never taught anyone:
+                                 park the playhead, press 入点, press 出点. It sets one edge only. -->
+                            <button type="button" id="peSetInBtn" class="pe-mini" data-i18n="peMarkIn">设入点</button>
+                            <button type="button" id="peSetOutBtn" class="pe-mini" data-i18n="peMarkOut">设出点</button>
+                        </div>
+                    </div>
+                </div>
+                <!-- A mark is the range *and* the views/size picked with it, kept per event. Long
+                     clips hold two or three things worth exporting and re-dragging both handles to
+                     find them again is what this removes. -->
+                <div class="pe-group">
+                    <span class="pe-label" data-i18n="peMarks">片段</span>
+                    <div class="pe-mark-row">
+                        <input type="text" id="peMarkName" class="pe-mark-name-input" maxlength="24"
+                            placeholder="名称" data-i18n-placeholder="peMarkNameHint" aria-label="片段名称"
+                            data-i18n-aria="ariaClipName">
+                        <button type="button" id="peMarkSaveBtn" class="pe-mini" data-i18n="peMarkSave">存为片段</button>
+                    </div>
+                    <div class="pe-mark-list" id="peMarkList" style="display: none;"></div>
+                </div>
+                <!-- The clip that just finished used to exist only inside a toast that lived eight
+                     seconds, and the way to send it to somebody was to leave the app and find it in
+                     a file manager. The last five, kept across restarts, each with the system share
+                     sheet on it — the second clip of an evening is the one that row is for. -->
+                <div class="pe-group" id="peLastGroup" style="display: none;">
+                    <span class="pe-label" data-i18n="peExportHistory">最近导出</span>
+                    <div class="pe-last-list" id="peExportList"></div>
+                </div>
+                </div>
+            </div>
+            <!-- R90 (direction B): the composed first frame, pinned under the scroller for the whole
+                 page. Inside the 画面 pane it was the last thing in a list you had to scroll to, and
+                 invisible from 叠加/范围 — so the three switches that most need an immediate answer
+                 (watermark, mosaic, 画面标注) changed a picture you could not look at. The head stays
+                 on screen even when the frame is toggled off, otherwise the switch to turn it back on
+                 would be inside the thing it hides. -->
+            <div class="pe-preview-dock" id="pePreviewDock">
+                <!-- R142: two flexible spacers center a wide strip in the free height; they only
+                     display in the landscape `.pe-wide-preview` layout. -->
+                <div class="pe-preview-spacer" aria-hidden="true"></div>
+                <canvas class="pe-preview" id="pePreviewCanvas" width="640" height="360" style="display: none;"
+                    role="button" tabindex="0" aria-label="放大预览" data-i18n-aria="peZoomOpen"></canvas>
+                <div class="pe-preview-cap" id="pePreviewCap" style="display: none;"></div>
+                <div class="pe-preview-spacer" aria-hidden="true"></div>
+                <div class="pe-dock-head">
+                    <!-- R140: the landscape dock prints its caption here; renderPreviewDock owns the
+                         text in both layouts, so this span no longer follows data-i18n. -->
+                    <span class="pe-label">预览</span>
+                    <!-- R142: the canvas was always tappable, but nothing said so. A magnifier beside
+                         预览帧 is the same zoom, with a target that does not cover the picture. -->
+                    <button type="button" id="peZoomBtn" class="pe-mini pe-zoom-open" aria-label="放大预览"
+                        data-i18n-aria="peZoomOpen">
+                        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="none"
+                            stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                            <circle cx="6.5" cy="6.5" r="4.2"></circle>
+                            <path d="M9.6 9.6 14 14"></path>
+                            <path d="M6.5 4.4v4.2M4.4 6.5h4.2"></path>
+                        </svg>
+                    </button>
+                    <button type="button" id="pePreviewBtn" class="pe-mini pe-preview-btn" data-i18n="peLayoutPreview">预览帧</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- R88: the composed frame, big. The sheet's own preview is 351 px wide, which is enough to
+         judge where the watermark sits and not enough to read it, and "does the burn-in cover
+         something that matters" can only be answered at the file's own size. Same canvas the sheet
+         paints, repainted here on swipe; a `.modal-overlay` again so the system back gesture
+         dismisses it like any other layer. -->
+    <div id="peZoomModal" class="modal-overlay pe-zoom-sheet" style="display: none;">
+        <div class="modal-content pe-zoom-panel" role="dialog" aria-modal="true" aria-label="预览放大"
+            data-i18n-aria="ariaZoomPanel">
+            <div class="pe-zoom-bar">
+                <button type="button" id="peZoomClose" class="pe-nav-back close-modal-btn" aria-label="关闭"
+                    data-i18n-aria="ariaClose">
+                    <svg viewBox="0 0 12 20" width="9" height="15" aria-hidden="true" fill="none" stroke="currentColor"
+                        stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2 2 10l8 8"/></svg>
+                    <span data-i18n="peBack">返回</span>
+                </button>
+                <!-- Swiping the zoom layer changes the second being shown, and that is the one
+                     thing on this layer a blind reader can still act on, so it announces itself. -->
+                <span class="pe-zoom-time" id="peZoomTime" role="status" aria-live="polite"
+                    aria-atomic="true"></span>
+                <span class="pe-zoom-hint" data-i18n="peZoomHint">左右滑换秒 · 双指缩放</span>
+            </div>
+            <div class="pe-zoom-stage" id="peZoomStage">
+                <canvas class="pe-zoom-canvas" id="peZoomCanvas" width="640" height="360"></canvas>
+            </div>
+            <div class="pe-zoom-cap" id="peZoomCap"></div>
+        </div>
+    </div>
+
+
+    <!-- A release WebView shows nothing on a JS exception, so a broken build looks like a
+         silent white screen the user can only screenshot. This makes it self-reporting. -->
+    <div id="jsErrorBanner" class="js-error-banner" role="alert" style="display: none;">
+        <span id="jsErrorText"></span>
+        <button type="button" id="jsErrorCopy" data-i18n="copyDetails">复制详情</button>
+        <button type="button" id="jsErrorClose" aria-label="关闭" data-i18n-aria="ariaClose">×</button>
+    </div>
+
+
+    <script src="vendor/flatpickr.min.js"></script>
+    <script src="vendor/flatpickr-zh.js"></script>
+    <script src="vendor/protobuf.min.js"></script>
+    <script src="dashcam-mp4.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,1 @@
+(function(){var b=document.querySelector("#searchCancelBtn");var r=b.getBoundingClientRect();var c=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);var p=[];while(c){p.push(c.tagName+"."+(c.className||"").toString().split(" ")[0]);c=c.parentElement;}return JSON.stringify({btn:{x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)},hit:p.slice(0,4)});})()

@@ -1,0 +1,1 @@
+JSON.stringify({inputs:document.querySelectorAll("#eventSearch").length,rows:document.querySelectorAll(".event-search-row").length,cancel:document.querySelectorAll("#searchCancelBtn").length,val:document.getElementById("eventSearch").value,active:document.activeElement&&document.activeElement.id})

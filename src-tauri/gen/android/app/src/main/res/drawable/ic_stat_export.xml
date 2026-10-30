@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Notification icon for the export job: an arrow writing into a tray. Deliberately a solid
+     white shape on transparent, because the system re-colours small icons and a detailed artwork
+     turns to mud at 24dp. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M11,3h2v8h3l-4,4 -4,-4h3z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4,13h2v3h12v-3h2v5a1,1 0 0,1 -1,1H5a1,1 0 0,1 -1,-1z" />
+</vector>

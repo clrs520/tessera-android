@@ -1,0 +1,1 @@
+(() => JSON.stringify([...document.querySelectorAll('#peCameraChips .recent-chip')].map(c => { const b = c.getBoundingClientRect(); return { t: c.textContent.trim(), on: c.classList.contains('on'), x: Math.round(b.x+b.width/2), y: Math.round(b.y+b.height/2) }; })))()

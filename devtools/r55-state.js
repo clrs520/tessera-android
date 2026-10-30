@@ -1,0 +1,1 @@
+JSON.stringify({v:typeof window.viewer,cls:document.querySelector(".sidebar").className,w:innerWidth,kb:0})

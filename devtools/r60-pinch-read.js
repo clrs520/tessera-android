@@ -1,0 +1,1 @@
+(() => { try { const p = window.__r60p; if (!p) return 'no hook'; return JSON.stringify({down: p.down, move: p.move, up: p.up, cancel: p.cancel, pinch: p.pinch, fingers: viewer.pictureFingers.size, notes: p.notes}); } catch (e) { return 'THREW ' + e.message; } })()

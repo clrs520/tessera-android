@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- R193/R196 — which USB devices may bring the app up when it is not running: mass storage only
+     (class 8 = mass storage). Subclass and protocol are left wild on purpose — an SSD enclosure can
+     report 6/80 (SCSI bulk-only), 6/0, or 6/98 (UAS), and the older two-entry list missed the last
+     one. A keyboard, a DAC or a phone in MTP mode is class 0 and must not launch a video viewer. -->
+<resources>
+    <usb-device class="8" />
+</resources>

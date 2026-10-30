@@ -1,0 +1,1 @@
+(() => { const b = document.getElementById('headerMenuBtn') || document.querySelector('.header-menu-btn'); b.click(); const g = document.getElementById('headerActionsGroup'); const r = g.getBoundingClientRect(); return JSON.stringify({ w: Math.round(r.width), h: Math.round(r.height), x: Math.round(r.x), y: Math.round(r.y), cls: g.parentElement.className }); })()

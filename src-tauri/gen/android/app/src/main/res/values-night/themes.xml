@@ -1,0 +1,10 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme. -->
+    <style name="Theme.tdashcam_studio" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- See values/themes.xml; the night variant has to repeat it or the light rules win
+             on a system-dark device. -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+    </style>
+</resources>
