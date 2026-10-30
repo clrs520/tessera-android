@@ -5,6 +5,12 @@ Tesla 行车记录仪的安卓播放器：六路相机（前、后、左、右�
 
 <p align="center"><a href="README.md">English</a> | 简体中文</p>
 
+## 支持这个分支
+
+如果这个安卓移植对你有用，可以扫码请我一杯咖啡（微信）：
+
+<p align="center"><img src="src/imgs/donate-qr.jpg" alt="微信打赏码" width="220"></p>
+
 ## 来源与署名
 
 本仓库是 **[DeaglePC/TDashcamStudio](https://github.com/DeaglePC/TDashcamStudio)** 的**分支（fork）**
@@ -62,12 +68,6 @@ npm run tauri build
 | `src-tauri/` | Rust crate；安卓工程在 `src-tauri/gen/android` |
 | `doc/ANDROID_CN.md` | 安卓移植工程日志 |
 | `devtools/` | 验收探针、构建脚本、CDP / adb 辅助工具 |
-
-## 支持这个分支
-
-如果这个安卓移植对你有用，可以扫码请我一杯咖啡（微信）：
-
-<p align="center"><img src="src/imgs/donate-qr.jpg" alt="微信打赏码" width="220"></p>
 
 ## 许可证
 

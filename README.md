@@ -4,6 +4,12 @@ An Android port of **[TDashcam Studio](https://github.com/DeaglePC/TDashcamStudi
 
 <p align="center">English | <a href="README_CN.md">简体中文</a></p>
 
+## Support the port
+
+If this Android port is useful to you, you can buy me a coffee (WeChat Pay):
+
+<p align="center"><img src="src/imgs/donate-qr.jpg" alt="WeChat donation QR" width="220"></p>
+
 ## Upstream & attribution
 
 This repository is a **fork** of **[DeaglePC/TDashcamStudio](https://github.com/DeaglePC/TDashcamStudio)**
@@ -67,12 +73,6 @@ npm run tauri build
 | `src-tauri/` | Rust crate; the Android project lives in `src-tauri/gen/android` |
 | `doc/ANDROID_CN.md` | the Android port engineering log |
 | `devtools/` | acceptance probes, build script, CDP/adb helpers used to verify builds on a device |
-
-## Support the port
-
-If this Android port is useful to you, you can buy me a coffee (WeChat Pay):
-
-<p align="center"><img src="src/imgs/donate-qr.jpg" alt="WeChat donation QR" width="220"></p>
 
 ## License
 
