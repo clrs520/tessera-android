@@ -6375,6 +6375,16 @@ const SPEED_SWEEP_BUDGET_SEGMENTS = 48;
 const SPEED_SWEEP_BUDGET_BYTES = 320 * 1024 * 1024;
 const SPEED_SWEEP_BUDGET_MS = 4000;
 
+// R200 — the same shape, for the ruler instead of the curve. Measuring every clip's length costs
+// ~10 ms of seeks each (300 real clips: 5 128 ms on the AVD), so a 24 h RecentClips (1 502 segments)
+// spent 15.9 s on it *before* `loadEvent` — measured open → first data 15.2 s. Up to this many
+// segments the open still measures the event up front exactly as R159 left it; past it only the
+// clip being opened is measured, and the rest is swept in these batches after the picture is up.
+const DURATION_PROBE_UPFRONT_FROM = 60;
+const RULER_SWEEP_BATCH = 120;
+const RULER_SWEEP_START_MS = 2500;
+const RULER_SWEEP_GAP_MS = 1500;
+
 // The export sheet draws the same frame twice — as a tile in the layout editor and inside the
 // composite preview, which is at most 720 px across with six views sharing it. One width means one
 // decode per view instead of two, and 320 px is still legible in a 260 px canvas box.
@@ -8862,11 +8872,18 @@ class ContinuousVideoPlayer {
      * covers the newest minutes, so on a full stick most Sentry events would book 60 s; `mvhd`
      * is three seeks per clip, so the event answers for itself in one bridge call before the
      * ruler is built. Returns true when anything was learned.
+     *
+     * R200 — `indexes` narrows the walk to the clips this open actually needs. A 24 h RecentClips
+     * is ~1 500 segments and every probe costs ~10 ms of FUSE seeks on the stick (measured on the
+     * AVD: 300 real clips 5 128 ms, the whole 1 502-segment event 15 913 ms), and this used to run
+     * in full before `loadEvent` — the reported 「最近里的大片要等一阵子才出画面」.
      */
-    async probeUnmeasuredClips(event) {
+    async probeUnmeasuredClips(event, opts = {}) {
         if (!isTouchShellRuntime() || !event?.segments?.length) return false;
+        const only = opts.indexes instanceof Set ? opts.indexes : null;
         const missing = [];
         for (let i = 0; i < event.segments.length; i += 1) {
+            if (only && !only.has(i)) continue;
             const segment = event.segments[i];
             if (Number.isFinite(segment.duration) && segment.duration > 0) continue;
             const file = segment.files?.front || Object.values(segment.files || {})[0];
@@ -8899,7 +8916,7 @@ class ContinuousVideoPlayer {
         return learned;
     }
 
-    async calculateEventDurations(event) {
+    async calculateEventDurations(event, opts = {}) {
         if (!event.segments || event.segments.length === 0) {
             event.totalDuration = 0;
             event.segmentDurations = [];
@@ -8943,7 +8960,9 @@ class ContinuousVideoPlayer {
         // Desktop has no measured durations at all, so this is the exact old path: one probe for the
         // last clip. On the phone it only runs for a clip whose `moov` the scan could not read —
         // and probing costs a full read through the media server, so it is not done for the others.
-        if (unmeasured > 0) {
+        // R200: `skipProbe` is the in-place rebuild after a background sweep — the last clip is on
+        // its way like the others, and opening a second media element mid-playback is not free.
+        if (unmeasured > 0 && !opts.skipProbe) {
             const lastSegment = event.segments[segmentCount - 1];
             if (!(lastSegment && Number.isFinite(lastSegment.duration) && lastSegment.duration > 0)) {
                 const repFile = lastSegment.files.front || lastSegment.files.back || lastSegment.files.left || lastSegment.files.right || lastSegment.files.left_pillar || lastSegment.files.right_pillar;
@@ -16850,17 +16869,34 @@ class TeslaCamViewer {
         const hasPillars = event.segments.some(seg => seg.files.left_pillar || seg.files.right_pillar);
         this.videoControls.updatePillarButtons(hasPillars);
 
-        // R159: the scan measures the newest minutes only; the event answers for its own clips
-        // before the ruler is built, so gaps and trims use real lengths too.
-        if (await this.continuousPlayer.probeUnmeasuredClips(event)) event.totalDuration = 0;
-        if (!event.totalDuration || event.totalDuration <= 0) {
-            await this.continuousPlayer.calculateEventDurations(event);
+        // R200: a 24 h RecentClips (~1 500 segments) costs ~10 ms of seeks per clip to measure, and
+        // R159 measured every one of them before `loadEvent` — 15.9 s of black screen on the AVD,
+        // the reported 「最近里的大片要等一阵子才出画面」. Past `DURATION_PROBE_UPFRONT_FROM` only the
+        // clip this tap lands on is measured here; the rest keeps the 60 s guess the ruler has
+        // always been built on and is swept once the picture is up (`sweepRulerDurations`).
+        // Below the threshold the open is bit-for-bit what R159 left.
+        const bigEvent = (event.segments || []).length > DURATION_PROBE_UPFRONT_FROM;
+        if (!bigEvent) {
+            // R159: the scan measures the newest minutes only; the event answers for its own clips
+            // before the ruler is built, so gaps and trims use real lengths too.
+            if (await this.continuousPlayer.probeUnmeasuredClips(event)) event.totalDuration = 0;
+            if (!event.totalDuration || event.totalDuration <= 0) {
+                await this.continuousPlayer.calculateEventDurations(event);
+            }
+            if (stale()) return;
         }
-        if (stale()) return;
-
         // R138: resolve the entry segment first, so a resumed clip opens the file it will play instead
         // of loading minute 0 and seeking away from it (two full splices, two holds, two black gaps).
         const entryIndex = this.tapEntryIndex(event);
+        if (bigEvent) {
+            if (await this.continuousPlayer.probeUnmeasuredClips(event, { indexes: new Set([entryIndex]) })) {
+                event.totalDuration = 0;
+            }
+            if (!event.totalDuration || event.totalDuration <= 0) {
+                await this.continuousPlayer.calculateEventDurations(event, { skipProbe: true });
+            }
+            if (stale()) return;
+        }
         await this.continuousPlayer.loadEvent(event, entryIndex);
         if (stale()) return;
         this.videoControls.setTotalDuration(this.continuousPlayer.getTotalDuration());
@@ -16880,6 +16916,9 @@ class TeslaCamViewer {
         // in `#playerArea` — so this is where its reveal has to be asked for by name. A segment
         // boundary is not: it goes through `playNextSegment()` and must leave the bar alone.
         this.videoControls.resetHideTimer();
+
+        // R200: the part of the ruler this open did not need, measured once the picture is up.
+        if (bigEvent) this.sweepRulerDurations(event, { skip: new Set([entryIndex]) });
 
         if (!isTouchShellRuntime()) {
             document.querySelectorAll('.video-card.active').forEach(c => c.classList.remove('active'));
@@ -19932,7 +19971,14 @@ class TeslaCamViewer {
         return (isFinite(start) ? start : 0) + Math.max(0, Math.min(saved.t || 0, length - 0.2));
     }
 
-    savedPositionFor(event) {
+    /**
+     * R200 — the saved 「clip i, t seconds in」 itself, resolved against this event. Kept separate
+     * from `savedPositionFor` because the clip index is the ruler-independent half: the tap can
+     * open the right file with it while the ruler is still nothing but 60 s guesses, which is what
+     * a 24 h RecentClips open now does instead of measuring every clip first.
+     * A number is a position saved before R77 and is returned as-is (ruler seconds).
+     */
+    savedClipPosition(event) {
         const map = this.readPositionMap();
         let saved = map[event.eventId];
         let index = saved && typeof saved === 'object' ? saved.i : null;
@@ -19954,9 +20000,19 @@ class TeslaCamViewer {
                 break;
             }
         }
+        if (!saved) return null;
+        if (typeof saved !== 'object') return saved;
+        const count = (event.segments || []).length;
+        if (!count) return null;
+        const i = Math.max(0, Math.min(index === null ? (saved.i | 0) : index, count - 1));
+        return { i, t: Math.max(0, Number(saved.t) || 0) };
+    }
+
+    savedPositionFor(event) {
+        const saved = this.savedClipPosition(event);
         const total = event.totalDuration || 0;
         if (!saved || !total) return 0;
-        const at = this.secondsFromPosition(event, index === null ? saved : { ...saved, i: index });
+        const at = this.secondsFromPosition(event, saved);
         if (at >= total - 5) return 0;
         return at;
     }
@@ -20656,6 +20712,18 @@ class TeslaCamViewer {
     tapEntryIndex(event) {
         if (!isTouchShellRuntime() || (!isPhoneLayout() && !isTabletLayout())) return 0;
         const mode = this.tapBehavior();
+        if (mode === 'resume') {
+            // R200: the saved position names a clip and an offset inside it, so the file to open
+            // is known without a ruler — the reason a resume no longer needs the clips before it
+            // measured before the picture can start. Once the ruler exists the near-end rule
+            // still applies (a clip watched to its end starts over).
+            const saved = this.savedClipPosition(event);
+            const known = (event.totalDuration || 0) > 0;
+            if (saved && typeof saved === 'object' && saved.i > 0
+                && (!known || this.savedPositionFor(event) > 0)) {
+                return Math.max(0, Math.min(saved.i, (event.segments || []).length - 1));
+            }
+        }
         let at = 0;
         if (mode === 'resume') at = this.savedPositionFor(event) || 0;
         else if (mode === 'event') at = this.eventOffsetSeconds(event) || 0;
@@ -20688,6 +20756,64 @@ class TeslaCamViewer {
         // The same sentence would have to mean two different things, so each mode gets its own verb.
         const said = mode === 'event' ? translations.jumpedTo : translations.resumedAt;
         this.showToast(`${said} ${this.videoControls.formatTime(at)}`, 'info', 2200);
+    }
+
+    /**
+     * R200 — the ruler's accuracy without the wait. `probeUnmeasuredClips` used to walk the whole
+     * event before `loadEvent`; a 24 h RecentClips is ~1 500 clips and each probe is ~10 ms of
+     * seeks on the stick, measured at 15.9 s of black screen. The picture now starts on the entry
+     * clip alone and this runs the same probe afterwards, one small batch per idle beat, then
+     * rebuilds the ruler in place — the playing feed is neither reloaded nor seeked, only the
+     * numbers behind the bar move. Stops the moment another event is opened.
+     */
+    sweepRulerDurations(event, opts = {}) {
+        if (!isTouchShellRuntime() || !event || event !== this.currentEvent) return;
+        const skip = opts.skip instanceof Set ? opts.skip : new Set();
+        const todo = [];
+        for (let i = 0; i < (event.segments || []).length; i += 1) {
+            if (skip.has(i)) continue;
+            const segment = event.segments[i];
+            if (Number.isFinite(segment.duration) && segment.duration > 0) continue;
+            const file = segment.files?.front || Object.values(segment.files || {})[0];
+            if (file?.path) todo.push({ index: i, path: file.path });
+        }
+        if (!todo.length) return;
+        const run = (this.rulerSweepRun = (this.rulerSweepRun || 0) + 1);
+        const step = async () => {
+            if (run !== this.rulerSweepRun || event !== this.currentEvent) return;
+            const batch = todo.splice(0, RULER_SWEEP_BATCH);
+            if (!batch.length) return;
+            let values;
+            try {
+                values = await nativeInvoke('probe_durations', { paths: batch.map(item => item.path) });
+            } catch (e) {
+                return; // a shell without the command keeps the 60 s guess, and so does the ruler
+            }
+            if (run !== this.rulerSweepRun || event !== this.currentEvent || !Array.isArray(values)) return;
+            batch.forEach((item, k) => {
+                const seconds = (Number(values[k]) || 0) / 1000;
+                if (seconds > 0) event.segments[item.index].duration = seconds;
+            });
+            await this.rebuildRulerInPlace(event);
+            if (todo.length) setTimeout(step, RULER_SWEEP_GAP_MS);
+        };
+        setTimeout(step, RULER_SWEEP_START_MS);
+    }
+
+    /**
+     * Rebuild the ruler from whatever durations are known now, without touching the picture.
+     * Skipped while a seek or a splice is in flight: those carry a target in ruler seconds, and
+     * moving the ruler under an unapplied target would land it on a different clip.
+     */
+    async rebuildRulerInPlace(event) {
+        const player = this.continuousPlayer;
+        if (!player || event !== this.currentEvent || player.currentEvent !== event) return;
+        if (player.seekInFlight || player.isTransitioning) return;
+        event.totalDuration = 0;
+        await player.calculateEventDurations(event, { skipProbe: true });
+        if (event !== this.currentEvent || player.currentEvent !== event) return;
+        this.videoControls.setTotalDuration(player.getTotalDuration());
+        this.videoControls.addEventMarkers(event);
     }
 
     showCardContextMenu(event) {

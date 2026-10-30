@@ -15781,3 +15781,57 @@ AVD 实测（891 目录 / 887 文件）：校验 3,151 ms → 封存 **1,150 ms*
 
 `Tessera-1.2.324.apk` 28,533,087 B，md5 `51efeb7f31fb697ab60ad8e301fb8f8e`，
 sha256 `93b6519c12a0866d43b96d55da241d8b72dc2182d01e9513187e5127cd0ffc60`。
+
+# R200 —— 「最近」里的大片要等一阵子才出画面
+
+真机报障（1.2.325）：`RecentClips/2026-10-08_05-12-31` 这类大事件，点开后要等一阵子才出画面。
+诊断里 `boot open=4219896 play=4235056`：**从点开到起播 15.16 s**。
+
+## 根因（先量后改）
+
+`beginEventPlayback()` 在 `loadEvent()` 之前 `await probeUnmeasuredClips(event)`，而
+`probeUnmeasuredClips` 会为**事件里的每一段**调一次原生 `probe_durations`。RecentClips 的「一个事件」
+是整卷 `RecentClips/` 按拆分策略切出来的，真机上就是 ~1 431 段；扫描的探测预算只有 200 个，
+所以剩下 1 231 段全在打开时现场量。
+
+AVD 夹具（1 502 段）上的实测：
+
+| 测量 | 数值 |
+|---|---|
+| 300 个真 clip 的 `probe_durations` | 5,128 ms（**17 ms/个**） |
+| 300 个 0 字节文件（纯 open/seek 开销） | 3,015 ms（10 ms/个） |
+| 整事件 `probeUnmeasuredClips(1502 段)` | **15,913 ms** |
+| 打开到第一帧数据（修复前） | **15,219 ms** |
+
+用户真机 15.16 s ÷ 1 431 段 ≈ 10.6 ms/段，与 AVD 的每文件成本完全吻合 —— 这是「按段数线性增长」，
+不是「文件大所以解码慢」。所以「视频太大」实际指的是「这个事件太长」。
+
+## 改法（只动手机档，>60 段才生效）
+
+- `probeUnmeasuredClips(event, { indexes })`：可以只量指定段；
+- 打开时**只量这一跳要播的那一段**（`entryIndex`），其余保持 60 s 猜测 —— 标尺本来就是这么建的；
+- `tapEntryIndex()` 恢复播放改成**按 clip 序号**定位（`savedClipPosition()`），不再依赖标尺秒数，
+  所以不用先量完整条前缀；
+- 画面起来之后（2.5 s 起，每 1.5 s 一批、每批 120 段）跑 `sweepRulerDurations()` 补量剩余段，
+  每批完成后 `rebuildRulerInPlace()` 原地重算标尺（**不 reload、不 seek 正在播的画面**；
+  正在 seek / 换段时跳过这一批，避免把「秒」目标落到另一段上）；
+- ≤60 段的事件走原路径，一字未改。
+
+## 实测（AVD，1 502 段夹具）
+
+| 阶段 | 修复前 | 修复后 |
+|---|---|---|
+| 点开 → 第一帧数据 | 15,219 ms | **351 ms** |
+| 点开 → 真正起播 | 21,064 ms | **1,315 ms** |
+| 打开时被量的段数 | 1 500 | **1**（其余 1 116 个 0 字节占位本来也量不出） |
+
+阶段计时（`loadEvent` 461 ms / `applyTapEntryPoint` 152 ms / `playAll` 1,110 ms）说明剩余时间都在
+真正该做的那三件事上，而不是探测。
+
+后台补测有效性：把 240 段临时指向真实文件后跑 `sweep`，386 → **626** 段被量出，标尺总量
+1 136 → **908 min** 修正，全程 `isPlaying=true`、`front.currentTime` 继续推进。
+
+回归：`r102-verify` 竖屏 **93/0**、横屏 **36/0**、`r185-scroll-chip` **5/0**。
+
+`Tessera-1.2.326.apk` 28,534,811 B，md5 `af368b71540f7cd5dd6ed9d6b4a4b0a5`，
+sha256 `7297e95fb1f97a4f852c4e69967bfcd69ee91765ee8269a52b1fe51055bcca18`。
