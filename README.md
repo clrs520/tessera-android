@@ -44,10 +44,10 @@ Prerequisites: Node 20+, Rust (stable), Android SDK 36, NDK 27, JDK 17.
 ```bash
 # full universal release APK (frontend is embedded into the Rust library)
 bash devtools/build-apk.sh
-# → TDashcamStudio/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+# → src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
 ```
 
-Release signing reads `TDashcamStudio/src-tauri/gen/android/app/keystore.properties`
+Release signing reads `src-tauri/gen/android/app/keystore.properties`
 (`storeFile` / `storePassword` / `keyAlias` / `keyPassword`). That file and the keystore itself are
 **not** committed; without it the build produces an unsigned APK.
 
@@ -63,7 +63,8 @@ npm run tauri build
 
 | Path | What |
 |---|---|
-| `TDashcamStudio/` | the app (Tauri 2 crate, frontend in `src/`, Android project in `src-tauri/gen/android`) |
+| `src/` | frontend (HTML / CSS / JS, embedded at build time) |
+| `src-tauri/` | Rust crate; the Android project lives in `src-tauri/gen/android` |
 | `doc/ANDROID_CN.md` | the Android port engineering log |
 | `devtools/` | acceptance probes, build script, CDP/adb helpers used to verify builds on a device |
 

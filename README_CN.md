@@ -39,10 +39,10 @@ Tesla 行车记录仪的安卓播放器：六路相机（前、后、左、右�
 ```bash
 # 完整 universal release APK（前端会被嵌进 Rust 动态库）
 bash devtools/build-apk.sh
-# 产物：TDashcamStudio/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+# 产物：src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
 ```
 
-签名读取 `TDashcamStudio/src-tauri/gen/android/app/keystore.properties`
+签名读取 `src-tauri/gen/android/app/keystore.properties`
 （`storeFile` / `storePassword` / `keyAlias` / `keyPassword`）。该文件与 keystore 本身**不入库**；
 没有它构建出来的是未签名包。
 
@@ -58,7 +58,8 @@ npm run tauri build
 
 | 路径 | 内容 |
 |---|---|
-| `TDashcamStudio/` | 应用本体（Tauri 2 crate、`src/` 前端、`src-tauri/gen/android` 安卓工程） |
+| `src/` | 前端（HTML / CSS / JS，构建时嵌入） |
+| `src-tauri/` | Rust crate；安卓工程在 `src-tauri/gen/android` |
 | `doc/ANDROID_CN.md` | 安卓移植工程日志 |
 | `devtools/` | 验收探针、构建脚本、CDP / adb 辅助工具 |
 
