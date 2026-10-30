@@ -68,6 +68,12 @@ npm run tauri build
 | `doc/ANDROID_CN.md` | the Android port engineering log |
 | `devtools/` | acceptance probes, build script, CDP/adb helpers used to verify builds on a device |
 
+## Support the port
+
+If this Android port is useful to you, you can buy me a coffee (WeChat Pay):
+
+<p align="center"><img src="src/imgs/donate-qr.jpg" alt="WeChat donation QR" width="220"></p>
+
 ## License
 
 GNU AGPL-3.0 — see [LICENSE](LICENSE). Copyright belongs to the upstream authors and

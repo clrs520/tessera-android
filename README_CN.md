@@ -63,6 +63,12 @@ npm run tauri build
 | `doc/ANDROID_CN.md` | 安卓移植工程日志 |
 | `devtools/` | 验收探针、构建脚本、CDP / adb 辅助工具 |
 
+## 支持这个分支
+
+如果这个安卓移植对你有用，可以扫码请我一杯咖啡（微信）：
+
+<p align="center"><img src="src/imgs/donate-qr.jpg" alt="微信打赏码" width="220"></p>
+
 ## 许可证
 
 GNU AGPL-3.0，见 [LICENSE](LICENSE)。版权归上游作者与本分支贡献者所有。
