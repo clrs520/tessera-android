@@ -816,6 +816,22 @@ body.dark-theme #eventFilter {
     min-height: 0;
 }
 
+/* R201 — while a drag is painting a run of cards the list stops being a scroller, so the same
+   finger can travel over rows instead of scrolling them. Removed on pointerup. */
+.file-list.drag-selecting {
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+}
+
+/* The hold that starts a paint must not turn into a text selection or the system context menu. */
+.sidebar.select-mode .file-list .video-card {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+}
+
 /* R173 · R181 — the height of the event rows the DOM window does not hold. Two of them stand around
    the built block, one above and one below, so the block can sit anywhere in a 10 000-row list and
    the row for event i still starts at i × pitch. Each is a real grid row so the scrollbar and every

@@ -7193,9 +7193,14 @@ class VideoListComponent {
         // Attach event listener to the card, but check for city-link target.
         // On touch the address is the loudest text in the row and lands right under the thumb, so
         // it is not a link there — 查看位置 moved into the long-press menu.
-        // R186: 选择态里点卡是勾选，不是播放。
+        // R186: 选择态里点卡是勾选，不是播放。R201: 一次拖选结束时手指抬起的那一下不是点击。
         if (this.viewer.selectionMode) {
-            card.onclick = (e) => { e.preventDefault(); e.stopPropagation(); this.viewer.toggleEventSelection(event.eventId); };
+            card.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (Date.now() < (this.viewer.suppressSelectTapUntil || 0)) return;
+                this.viewer.toggleEventSelection(event.eventId);
+            };
             card.classList.add(this.viewer.eventOwnFolder(event) ? 'selectable' : 'locked');
             card.setAttribute('aria-selected', String(this.viewer.selection.has(event.eventId)));
             if (this.viewer.selection.has(event.eventId)) card.classList.add('picked');
@@ -15164,6 +15169,7 @@ class TeslaCamViewer {
         this.dom.drawerSelectBtn?.addEventListener('click', () => this.setSelectionMode(!this.selectionMode));
         this.dom.selectAllBtn?.addEventListener('click', () => this.toggleSelectAll());
         this.dom.batchDeleteBtn?.addEventListener('click', () => this.openBatchDeleteConfirm());
+        this.setupDragSelect();
         this.selectionMode = false;
         this.selection = new Set();
         // R98: the undo window is a timer, and a backgrounded WebView does not run timers — an armed
@@ -21024,6 +21030,151 @@ class TeslaCamViewer {
     }
 
     /**
+     * R201 — paint a run of cards instead of tapping forty of them. In selection mode a
+     * press-and-hold on a card anchors the run and the finger then paints it; near either edge the
+     * list scrolls itself so the run can cross a screen boundary. A press that moves before the
+     * hold elapses is still a scroll, and a tap still toggles one card — the hold is the only way
+     * into painting, so nothing that used to work changes.
+     */
+    setupDragSelect() {
+        if (!isTouchShellRuntime()) return;
+        const list = this.dom.fileList;
+        if (!list || this.dragSelectBound) return;
+        this.dragSelectBound = true;
+        const HOLD_MS = 180;
+        const SLOP_PX = 10;
+        const EDGE_PX = 56;
+        const EDGE_STEP = 10;
+        let timer = 0;
+        let startX = 0;
+        let startY = 0;
+        let anchor = -1;
+        let base = null;
+        const state = this.dragSelectState = { active: false, x: 0, y: 0, last: -1, raf: 0 };
+
+        const indexOf = (card) => {
+            const id = card && card.dataset && card.dataset.eventId;
+            if (!id) return -1;
+            return (this.lastFilteredEvents || []).findIndex((e) => e.eventId === id);
+        };
+        const cardNear = (x, y) => {
+            const hit = document.elementFromPoint(x, y);
+            const card = hit && hit.closest ? hit.closest('.video-card') : null;
+            if (card && list.contains(card)) return card;
+            // A point in a gutter, on a spacer or past the last row still has an obvious nearest
+            // row — snapping to it keeps the paint continuous while the finger travels.
+            let best = null;
+            let bestD = Infinity;
+            for (const candidate of list.querySelectorAll('.video-card')) {
+                const r = candidate.getBoundingClientRect();
+                const dx = x < r.left ? r.left - x : (x > r.right ? x - r.right : 0);
+                const dy = y < r.top ? r.top - y : (y > r.bottom ? y - r.bottom : 0);
+                const d = dx * dx + dy * dy;
+                if (d < bestD) { bestD = d; best = candidate; }
+            }
+            return bestD <= 1600 ? best : null;
+        };
+        const paint = (toIndex) => {
+            if (!state.active || anchor < 0 || toIndex < 0 || toIndex === state.last) return;
+            state.last = toIndex;
+            const events = this.lastFilteredEvents || [];
+            const lo = Math.min(anchor, toIndex);
+            const hi = Math.max(anchor, toIndex);
+            this.selection.clear();
+            if (base) base.forEach((id) => this.selection.add(id));
+            for (let i = lo; i <= hi; i += 1) {
+                const ev = events[i];
+                // 循环录像没有自己的文件夹 —— 与单点、全选同一条规则，画到它身上就跳过。
+                if (ev && this.eventOwnFolder(ev)) this.selection.add(ev.eventId);
+            }
+            for (const card of list.querySelectorAll('.video-card')) {
+                const on = this.selection.has(card.dataset.eventId);
+                card.classList.toggle('picked', on);
+                card.setAttribute('aria-selected', String(on));
+            }
+            this.updateSelectionUI();
+            haptic('light');
+        };
+        const edgeScroll = () => {
+            if (!state.active) return;
+            const r = list.getBoundingClientRect();
+            if (state.y < r.top + EDGE_PX) list.scrollTop -= EDGE_STEP;
+            else if (state.y > r.bottom - EDGE_PX) list.scrollTop += EDGE_STEP;
+            const card = cardNear(state.x, state.y);
+            if (card) paint(indexOf(card));
+            state.raf = requestAnimationFrame(edgeScroll);
+        };
+        const end = () => {
+            clearTimeout(timer);
+            timer = 0;
+            if (!state.active) return;
+            this.cancelDragSelect();
+            // The finger-up that ends a paint is not a tap on whatever card it happens over.
+            this.suppressSelectTapUntil = Date.now() + 400;
+        };
+        list.addEventListener('pointerdown', (e) => {
+            if (!this.selectionMode || !e.isPrimary) return;
+            if (e.pointerType !== 'touch' && e.pointerType !== 'pen' && e.pointerType !== 'mouse') return;
+            const card = e.target.closest && e.target.closest('.video-card');
+            if (!card || !list.contains(card)) return;
+            const index = indexOf(card);
+            if (index < 0) return;
+            startX = e.clientX;
+            startY = e.clientY;
+            state.x = e.clientX;
+            state.y = e.clientY;
+            clearTimeout(timer);
+            const pointerId = e.pointerId;
+            timer = setTimeout(() => {
+                timer = 0;
+                if (!this.selectionMode) return;
+                anchor = index;
+                base = new Set(this.selection);
+                state.active = true;
+                state.last = -1;
+                list.classList.add('drag-selecting');
+                // Capture keeps the moves coming once the finger leaves the list, which is exactly
+                // where the edge scroll is steering from. A synthetic pointer (probes) may refuse.
+                try { list.setPointerCapture(pointerId); } catch (err) { /* no capture */ }
+                paint(index);
+                haptic('medium');
+                state.raf = requestAnimationFrame(edgeScroll);
+            }, HOLD_MS);
+        }, { passive: true });
+        list.addEventListener('pointermove', (e) => {
+            if (!state.active) {
+                if (timer && (Math.abs(e.clientX - startX) > SLOP_PX || Math.abs(e.clientY - startY) > SLOP_PX)) {
+                    clearTimeout(timer);      // that press was a scroll
+                    timer = 0;
+                }
+                return;
+            }
+            state.x = e.clientX;
+            state.y = e.clientY;
+            const card = cardNear(e.clientX, e.clientY);
+            if (card) paint(indexOf(card));
+        }, { passive: true });
+        ['pointerup', 'pointercancel', 'blur'].forEach((type) => {
+            list.addEventListener(type, end, { passive: true });
+        });
+        // While painting, the finger must not scroll the list under itself; outside a paint this
+        // listener does nothing, so ordinary scrolling is untouched.
+        list.addEventListener('touchmove', (e) => {
+            if (state.active) e.preventDefault();
+        }, { passive: false });
+    }
+
+    cancelDragSelect() {
+        const state = this.dragSelectState;
+        if (!state || !state.active) return;
+        state.active = false;
+        if (state.raf) cancelAnimationFrame(state.raf);
+        state.raf = 0;
+        state.last = -1;
+        this.dom.fileList?.classList.remove('drag-selecting');
+    }
+
+    /**
      * R186 · 批量删除（A 案：抽屉顶栏「选择」）。选择态只做三件事：点卡勾选、全选、删掉勾中的。
      * 单条删除那条链（openDeleteConfirm → confirmDeleteEvent → undo/flush）一个字段都没改形状，
      * 批量只是给同一个 confirmDeleteEvent 多塞了一个 `items` —— 少一条并行的删除路径，就少一处
@@ -21032,6 +21183,7 @@ class TeslaCamViewer {
     setSelectionMode(on, { silent = false } = {}) {
         const want = !!on;
         if (this.selectionMode === want) return;
+        if (!want) this.cancelDragSelect();
         this.selectionMode = want;
         if (!want) this.selection.clear();
         this.dom.sidebar?.classList.toggle('select-mode', want);
