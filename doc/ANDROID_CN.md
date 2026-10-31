@@ -16051,7 +16051,7 @@ A2 挡下的那次重建记成欠账 = undefined        ← 红
   否则根 `read_dir` 一定看得见，测不出缓存。
 - **这台 AVD 只有 2.4 GB**：重启后 boot storm（load 17~32）会把 APP 直接 OOM 掉，
   表现是「timed out waiting for the WebView to answer」和 `ps` 里查无此人 —— 不是包坏。
-  本轮为此重启过一次模拟器，`r182-note` 之后没能再跑（见 §4 的诚实清单）。
+  本轮为此重启过一次模拟器，并等 `/proc/loadavg` 落到 6 以下才把最后两套判据跑干净。
 
 ## 4. 装机验收（1.2.329）
 
