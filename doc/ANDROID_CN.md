@@ -16155,6 +16155,105 @@ sha256 `8bfed292446eb1cca7232d289b318c8cd4e726bf21cfcea6f2615bd3aa35c499`。
 
 ## 5. 剩下的账
 
-第 4 批原生生命周期（`startForeground` 未兜底、`onDestroy` 不取消任务、导出无墙钟看门狗、
-同步桥仍做 FUSE、`ThumbFetcher` executor、`.part` 改名、`ExportEngine.kt:719` 用 `currentTimeMillis` 节流）。
+第 4 批原生生命周期已在下面的 **R206** 一节还了五条（`startForeground` 兜底、`onDestroy` 取消任务、
+节流改单调钟、`ThumbFetcher` executor、`.part` 改名）。同一张清单里的**「同步桥仍在主线程做 FUSE IO」这一条没做**，
+仍挂在 R206 §5 上（要先把哪几个调用真的走 FUSE 量出来，不能凭表面对称改）。
 第 5 批 UI（四处禁用态 `opacity`、目录浏览器不吃 `--kb-h`、32/40 px、`inert` 名单、玻璃采样白跑）。
+
+# R206 —— 第 4 批：原生这一层的生命周期，任务和服务要对得上
+
+用户回「请继续，不要停，一次性搞完」⇒ 第 4 批（R203 审计里 Kotlin 生命周期那一摊）。这一批的缺陷在
+页面上一个都看不见，但每一条的结局都是**用户已经付出去的时间与文件，最后什么都没拿到**：服务起不来
+把整个 APP 带走、系统停服务之后编码还在烧 CPU、进程半路死掉留一个相册里 0 秒点开报错的 .mp4、
+中途校时把进度条冻住、每次重建 activity 泄漏一条线程。
+
+## 1. 先红：1.2.330 上的读数
+
+`bash devtools/r206-verify.sh` —— 四条红，13 条前置与不回归全绿（前置红了就不算结论，所以每一条
+都单独钉住「这件事真的发生过」）：
+
+```
+N6 activity 重建不泄漏线程池线程（每次重建净增 0） = 3 → 4，重建 3 次
+N4 墙钟回拨 2 小时之后，进度回报的频率不许塌掉 = 拨钟前 1.63 条/秒 → 拨钟后 0.13 条/秒｜百分比 15→46→49→100
+N3 服务被停掉之后任务要收手（拿到 cancelled 回执，而不是照常跑完） = {"phase":"done","frames":617,"path":"…_4c_928x2048 (2).mp4"}
+N5 进程半路死掉不留 .mp4 孤儿（新出现的只许是 .part） = {"fresh":["…_4c_928x2048.mp4"],"parts":[]}
+```
+
+同一轮里作为对照的两条：`期间前台的 ExportService 记录 = 1`（前台身份本来是真的，所以 N3 的红不是
+「根本没进前台」），`设备钟面 = 10:00`（墙钟确实被拨回去过两小时，N4 测的不是没发生的事）。
+
+## 2. 改了什么（全在 Kotlin 侧，JS 与桌面一字未动）
+
+| # | 位置 | 根因 → 修法 | 证据分级 |
+|---|---|---|---|
+| N1/N2 | `ExportService.kt:258-265`、`:371`（`promote()` 现在返回 Boolean）、`ScanService.kt:51-60` | `startForeground()` **允许抛**：Android 14+ 的 dataSync 当日配额、ROM 拒这个类型、task 已被移除。裸调用抛在 `onCreate` 里 ⇒ 整个进程没了：页面、WebView、正在跑的扫描一起消失。改：`runCatching` 兜住，抛了就 `Log.w` + 拒绝那一个作业（`reportStartFailure` `:169`，用 `submit()` 记下的 `pendingId` `:96` 把回执寄回**它点名的那个作业**）+ `stopSelf()`；`onStartCommand` 第一行 `if (!promised) return START_NOT_STICKY`（`:271`）——没拿到前台身份就不许解一帧 | 代码可证 + happy path 回归（AVD 造不出「被拒」：root shell 起 FGS 一律 `Background started FGS: Allowed … code:SYSTEM_UID`，实测不抛）|
+| N3 | `ExportService.kt:305` | 系统/用户停服务（配额、下拉通知里手停、内存压力）只走 `onDestroy`，原来那里只释放唤醒锁 ⇒ 进程已无前台身份却还在满速编码，随时被杀、文件停在半截。改：`if (ExportHost.isBusy()) ExportHost.cancel(0)`，让引擎自己收尾——写出过帧的按「已写入的片段」留，一段没写的删 | 已实测（红→绿） |
+| N4 | `ExportEngine.kt:748`、预热循环 `:298` | 节流用 `System.currentTimeMillis()`（墙上时钟）。中途校时往回拨两小时 ⇒ `now - lastReportAt` 变成大负数，**永远**小于 300 ms ⇒ 进度回报彻底停发，而片子还在照常编。改：`SystemClock.elapsedRealtime()`（单调） | 已实测（红→绿） |
+| N5 | `ExportEngine.kt:198`、`:262`、`:529`、`:564-580` | `MediaMuxer` 直接开在成品名上：进程半路死掉（低内存、上滑划掉、`force-stop`）就留下一个**已 open、没有 moov** 的正式 `.mp4` —— 相册里 0 秒、点开报错、还会被「最近导出」扫进列表。改：开在 `<名>.mp4.part` 上，只有「值得交付」才改名成成品名；`payload.path` 一律取 `keptPath`（没改成功就是空串），`bytes` 同理 | 已实测（红→绿） |
+| N5b | `ExportEngine.kt:570-571` | 改名失败原先是「删掉目标再改名」。目标存在只可能是**别人**（相机、浏览器、另一个 APP）往同一个下载目录里写了同名的东西 ⇒ 抹掉一次成品比多一个「(2)」严重得多。改：失败就再要一个不冲突的名字（`uniqueOutputFile(outputFile)`），永不删除非自己写的文件 | 代码可证（AVD 上没有并发写手，造不出冲突） |
+| N6 | `MainActivity.kt:107-110`、`:315` + `ThumbFetcher.kt:37` | `volume`/`state` 两个池在 `onDestroy` 里 `shutdownNow()`，`thumbFetcher` 是 lazy 的、没人关 ⇒ 每次 activity 重建（改系统字号、切深色、旋转配置变化）净泄漏一条 `pool-N-thread-1`，永不回收。改：`fun close() { executor.shutdownNow() }`，`onDestroy` 里**只在它真的生出来过**时关（`thumbFetcherLazy.isInitialized()`）——为「关掉一个不存在的东西」把它建出来，正是这个泄漏的反面 | 已实测（红→绿） |
+
+拒绝用户可见的那一句话用页面里已有的 `startFailed`（`ExportHost.label`），不新增只有 Kotlin 认识的码 ——
+没有译文的码会直接在 toast 上漏出英文原文。
+
+## 3. 这一批撞出来的工具坑（判据改了三版才肯分辨）
+
+- **速率判据的两个窗口必须同阶段、同长度、且都在作业活着的时候**：第一版在 T+2 s 起量，那 4 秒引擎还没热
+  （百分比 0→2、只出 2 条回报），拿它当基线是比噪声；第二版用 shell 轮询等百分比 ≥20 %，一次 probe 自身
+  ~2 s + sleep 5 s，看到 20 % 时实际已经 46 %，后一段 8 秒直接跨过终点 —— 而**终点回执是绕过节流直接发布的**，
+  所以「作业跑完」那一段照样能看到 1~2 条回报，看着像「没塌」。⇒ 等百分比这件事挪进页内用 250 ms 循环等，
+  并且每个采样点都把 `job===true` 钉成前置。
+- **孤儿文件判据必须先记起跑前的清单再做差**：上一单**成功**的导出正好占着正式名，直接 `ls | grep 基础名`
+  会把成功产物念成孤儿（本轮误红一次）。反过来也不成立：`uniqueOutputFile` 会写成 `名字 (9).mp4`，
+  那不是基础名的子串，裸 grep **又会漏掉真孤儿**。⇒ before/after 两份清单取差集，差集里只许出现 `.part`，
+  并额外要求「差集非空」（否则「什么都没写」会白捡通过）。
+- **「activity 被重建了」这件事本身也要断言**：线程账靠改 `font_scale` 触发重建，但改完不一定真重建。
+  页内先钉 `window.__r206gen='g1'`，重建后读回来是 `gone` 才算数；判据要求确认重建 ≥2 次才比线程数。
+- **改正在运行的 bash 判据脚本 = 同时开两轮**：上一轮还活着（bash 边读边执行，改完直接在半路
+  `syntax error near unexpected token ')'`），两轮共用 `$TMP/r206-probe.js` ⇒ 一份被写歪的 JS 喂进 WebView，
+  症状是 `SyntaxError: await is only valid…`，另一轮还在 `am force-stop` 抢前台。现在每个进程一套临时文件
+  （带 `$$`）+ `mkdir` 原子锁（本机没有 `pgrep`），锁 40 分钟内不许第二轮。
+- **改 `font_scale` 连重建几次之后，AVD 的 WebView JS 线程会彻底不动**：进程在、焦点在我们、
+  `webview_devtools` socket 也在，但**连 `1+1` 都 25 s 不返回**；`adb shell` 一切照常，所以 bash 层看不出来，
+  后面每一步都拿到空串。⇒ 大动作之间加一个 `alive()` 探针，不回话就 `force-stop + start` 复活（实测一次就活）。
+
+## 4. 装机验收（1.2.331）
+
+改前红（§1，`1.2.330` 上采）⇒ 改后在**交付的那一份 APK**（28,542,359 B，
+md5 `1bdf6ef159e3be4606ed2ab73b1f8a12`，sha256 `c0921077d82619f85183f460aab6aeebc3e32d66d0c771f63b9354a2154bdf03`）上：
+
+- `devtools/r206-verify.sh` **17 条断言 0 红**：N6 线程 3 → 2（重建 3 次）、N4 拨钟后仍有 1.13 条/秒
+  （拨钟前 1.75）、N3 拿到 `cancelled` 且前台通知为 0、N5 差集里只有 `.mp4.part`、
+  导出期间前台身份 = 1、中途拨钟那一单仍然 `done`。
+- `devtools/r149-export-cancel.js` ok：起播 120 ms 内取消 ⇒ `frames:0` + `path:""`（不留空壳）。
+  这一条本轮把钩子改稳了：原先钩 `window.__tdashcamExportProgress` 这个**全局名**，
+  而面板每次装配都会重新指派它（`script.js:24942`）⇒ 只有「面板恰好已经装配过」的会话才通过，
+  冷启动那轮拿到的是「30 s 内没有终止载荷」。现在钩实例方法并自己钉住钩子在不在。
+- 回归（同一份包，全绿）：`r205-verify` **10/0**、`r205-sidecar` **4/0**、`r204-verify` **9/0**、
+  `r203-verify` **12/0**、`r201-dragselect` **11/0**、`r186-batch-delete` **17/0**、`r185-scroll-chip` **5/0**、
+  `r182-note` **24/0**、`r102-verify` 竖屏 **92/0** —— 连上面两条合计 **202 条断言 0 红**。
+
+**本轮没能复测的四条（记在这里，不算通过）**：`r102-verify-landscape`（36）、`r173-verify`（40）、
+`r138-verify-fixes`、`r204-scan-cache`（5）。原因：横屏那两套跑到一半 WebView 不再回话（§3 那条），
+恢复之后这台模拟器上又有第三方自动化在反复替换包与抢前台（`am start` 报「Activity class does not exist」
+而 `pm path` 指着我刚装的 base.apk）。这四条覆盖的面（横屏玻璃/横屏筛选面/换段 hold/扫描缓存）
+本批一行未动 —— 改动全在 Kotlin 服务生命周期与导出文件名上，而导出这一面被上面 r206 的三次完整导出
++ 两次取消 + 一次中途拨钟，以及 r149 走遍了。下一轮补跑，补不到就仍然挂着。
+
+## 5. 剩下的账
+
+- **同步桥仍在主线程做 FUSE IO**（R203 第 4 批清单上的一条，本轮**没做**）：`MainActivity` 的同步问答里
+  有会落到外接存储的路径，慢 FUSE 上就是 ANR 的形状。动手前要先量出「哪几个调用真的落到 FUSE、最坏多少毫秒」——
+  按表面对称去改会把不走 FUSE 的分支也拖进线程池。留作下一批第一条。
+- **`.part` 永不回收**：崩掉的作业会在下载目录留下 `<名>.mp4.part`。界面看不见（JS 的「最近导出」
+  按 `.mp4` 结尾过滤），但文件管理器里会攒。要么起单时顺手删同前缀的旧 `.part`，要么按 mtime 清 ——
+  先记账，本批不做（做就要定「多旧算旧」，而那是要拍的设计取向）。
+- **取消单上的附注码**：r206 里停服务那一单终态是 `cancelled`（对的），但 `code` 被
+  `darkSome`（「有 N 路全程没有画面」）占走，`cancelledKept` 那句反而没上屏。这句话在这种半路停的单里
+  到底算不算附注，等真机反馈再定 —— 现在只把现象记下来，不改文案优先级。
+- **N1/N2 只有代码可证**：AVD 造不出 `startForeground` 被拒（root shell 起前台服务一律
+  `Background started FGS: Allowed … code:SYSTEM_UID`，实测不抛）。改后的 happy path（导出期间
+  前台身份 = 1、通知随任务撤销）测过；被拒那一支要真机（尤其 Android 14+ 用满配额的机型）才有现场。
+- 第 5 批 UI 仍在账上：四处禁用态 `opacity`（`styles.css:5391 / 7799 / 11053 / 11689`）、目录浏览器不吃
+  `--kb-h`、无 role 卡片上的 `aria-selected`、`inert` 名单缺 `#metaDetailOverlay` 与 `#exportPill`、
+  导出页 × 与几处 <40 px 目标、白跑的玻璃采样与诊断。
