@@ -104,9 +104,10 @@ class MainActivity : TauriActivity() {
     private var webView: WebView? = null
     private var insetDeclarations = ""
     // Lazy: `applicationContext` is not attached yet while field initialisers run.
-    private val thumbFetcher by lazy {
+    private val thumbFetcherLazy = lazy {
         ThumbFetcher(applicationContext) { id, dataUrl -> publishThumb(id, dataUrl) }
     }
+    private val thumbFetcher by thumbFetcherLazy
     private val volumeExecutor = Executors.newSingleThreadExecutor()
     private var pendingNotifAsk = false
     // R192: whether the page is on screen, and the mount event that arrived while it was not.
@@ -309,6 +310,9 @@ class MainActivity : TauriActivity() {
         // this every recreation left three non-daemon threads behind.
         volumeExecutor.shutdownNow()
         stateExecutor.shutdownNow()
+        // R206: 取帧那条也是每人一条（`ThumbFetcher` 是 lazy 的，之前没人关）。只在它真的生出来过
+        // 的时候关 —— 为「关掉一个不存在的东西」而把它建出来，正是要避免的泄漏的反面。
+        if (thumbFetcherLazy.isInitialized()) runCatching { thumbFetcher.close() }
         super.onDestroy()
     }
 

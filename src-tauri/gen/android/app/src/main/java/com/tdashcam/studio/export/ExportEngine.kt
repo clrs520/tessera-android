@@ -6,6 +6,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.os.Build
+import android.os.SystemClock
 import android.media.MediaMuxer
 import android.util.Log
 import android.view.Surface
@@ -192,6 +193,9 @@ class ExportEngine {
         // not the camera set or the overlay switches, so two legal exports can collide; the muxer
         // would silently overwrite the first one. A suffix keeps both files and both history rows.
         val outputFile = uniqueOutputFile(File(request.outPath))
+        // R206 — 容器开在成品名旁边加 `.part` 的路径上，成功（或取消但值得留）之后才改名。
+        // MediaMuxer 只认路径不认文件名，改名不动它写过的字节。
+        val partFile = File("${outputFile.absolutePath}.part")
         var failure: String? = null
         var tailNote: String? = null
         // Which code the page should put words against, and the numbers its sentence needs. The
@@ -255,7 +259,7 @@ class ExportEngine {
                 Log.w(TAG, "surface is ${renderer.surfaceWidth}x${renderer.surfaceHeight}, asked for ${request.width}x${request.height}")
             }
 
-            muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            muxer = MediaMuxer(partFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
 
             for (camera in request.cameras) {
                 streams += CameraStream(camera.camera, camera.cellIndex, camera.rect, camera.mosaic,
@@ -291,8 +295,8 @@ class ExportEngine {
             // 落地前就跑完 —— 于是每一路都被判成「从没交出画面」，整个文件被当黑片删掉。先给解码器
             // 一次有界的预热，再判第 0 帧。
             for (stream in streams) runCatching { stream.advanceTo(0L) }
-            val warmUntil = System.currentTimeMillis() + 600
-            while (System.currentTimeMillis() < warmUntil && streams.any { !it.hasPostedFrame() }) {
+            val warmUntil = SystemClock.elapsedRealtime() + 600
+            while (SystemClock.elapsedRealtime() < warmUntil && streams.any { !it.hasPostedFrame() }) {
                 Thread.sleep(10)
             }
 
@@ -522,7 +526,7 @@ class ExportEngine {
             synchronized(this) { if (running === job) running = null }
         }
 
-        val size = if (outputFile.exists()) outputFile.length() else 0L
+        val size = if (partFile.exists()) partFile.length() else 0L
         if (failure == null && size == 0L) { failure = "the file came out empty"; failureCode = "emptyFile" }
         // A file with no picture in it is not a finished export, whatever the encoder said: the muxer
         // closes happily over a strip of overlays on a black surface. Say so, and let the cleanup
@@ -553,15 +557,37 @@ class ExportEngine {
         // 用户在头几百毫秒里取消，留下的是一个没有 moov 的空壳 —— 相册里显示 0 秒、点开就报错，
         // 还会被 JS 侧扫进「最近导出」。取消时那句话承诺的是「已写入的片段」，不是「文件存在」。
         val keep = framesWritten > 0 && size > 0L && !(failure != null && !job.cancelled.get())
-        if (!keep) runCatching { outputFile.delete() }
+        // R206 — 「值得留」才改名成成品名，其余一律把这个半截容器删掉。
+        // 交付的那一刻才是承诺：之前它一直叫 `<name>.mp4.part`，所以进程被半路杀掉（低内存、系统停
+        // 服务、用户上滑划掉）留下的是相册认不出的 `.part`，而不是一个没有 moov、点开报错、还会被
+        // 「最近导出」扫进列表的正式 .mp4。
+        var keptPath = ""
+        if (keep) {
+            // `renameTo` 在目标已经存在时返回 false —— 起跑那一次 `uniqueOutputFile` 查过没有，
+            // 但下载目录不是我们独占的（相机、浏览器、别的 APP 都会往里写）。
+            // 这时候要的是**再要一个不冲突的名**，不是把占着那个名的文件删掉：
+            // 抹掉别人（或上一单）已经写好的成品，比多一个「(2)」严重得多。
+            val direct = runCatching { partFile.renameTo(outputFile) }.getOrDefault(false)
+            val target = if (direct) outputFile else uniqueOutputFile(outputFile)
+            val renamed = direct || runCatching { partFile.renameTo(target) }.getOrDefault(false)
+            if (renamed && target.isFile) keptPath = target.absolutePath
+            else {
+                runCatching { partFile.delete() }
+                failure = "the finished file could not be moved into place"
+                failureCode = "renameFailed"
+                failureArgs = emptyMap()
+            }
+        } else {
+            runCatching { partFile.delete() }
+        }
 
         val payload = JSONObject().apply {
             put("id", request.id)
             put("phase", if (job.cancelled.get()) "cancelled" else if (failure == null) "done" else "error")
             put("percent", if (failure == null) 100 else 0)
             put("frames", framesWritten)
-            put("path", if (keep) outputFile.absolutePath else "")
-            put("bytes", if (keep) size else 0L)
+            put("path", keptPath)
+            put("bytes", if (keptPath.isNotEmpty()) size else 0L)
             put("message", failure ?: if (job.cancelled.get()) {
                 if (keep) "cancelled, the written part is kept" else "cancelled"
             } else (tailNote ?: ""))
@@ -716,7 +742,10 @@ class ExportEngine {
 
     private fun report(job: Job, phase: String, percent: Float, code: String,
                        message: String = "", args: Map<String, Any> = emptyMap()) {
-        val now = System.currentTimeMillis()
+        // R206: 单调钟。`currentTimeMillis()` 是墙上时钟，中途校时（用户改时间、运营商回灌、
+        // 出国换时区都算）会把它往回拨，`now - lastReportAt` 一变负就永远小于 300 ms —— 进度条
+        // 冻在拨钟那一刻的百分比，直到墙钟自己爬回去，而片子还在照常编码。
+        val now = SystemClock.elapsedRealtime()
         if (now - job.lastReportAt < REPORT_MIN_INTERVAL_MS && percent < 1f) return
         job.lastReportAt = now
         val payload = JSONObject().apply {

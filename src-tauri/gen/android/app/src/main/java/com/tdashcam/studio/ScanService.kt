@@ -46,11 +46,20 @@ class ScanService : Service() {
                 )
             )
             .build()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        // R206: 与导出同一个理由 —— 这一抛原本发生在 onStartCommand 里，整个进程陪葬，而扫描只是
+        // 想要一段不被冻结的时间。要不到就不保护，扫描照常在后台跑（R190 之前一直如此）。
+        val promised = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            true
+        }.getOrElse {
+            android.util.Log.w("ScanService", "startForeground refused", it)
+            false
         }
+        if (!promised) stopSelf()
         return START_NOT_STICKY
     }
 

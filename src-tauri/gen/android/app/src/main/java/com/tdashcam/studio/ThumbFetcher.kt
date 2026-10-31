@@ -29,6 +29,15 @@ class ThumbFetcher(
     private val executor = Executors.newSingleThreadExecutor()
     private var writesSinceSweep = 0
 
+    /**
+     * R206 — 页面重建会换一个 ThumbFetcher，而这条线程不是守护线程：没人关它就一直留着，
+     * 每次重建多一条（改系统字号、切换语言、深浅色跟随系统都会重建）。帧是后台的锦上添花，
+     * 关掉排队里的活儿不会丢任何东西 —— 下一次要图就直接重新解。
+     */
+    fun close() {
+        runCatching { executor.shutdownNow() }
+    }
+
     fun request(id: String, path: String, millis: Long, width: Int) {
         executor.execute {
             val t0 = SystemClock.elapsedRealtime()

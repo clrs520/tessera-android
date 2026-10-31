@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -50,6 +51,11 @@ object ExportHost {
     var labels: JSONObject = JSONObject()
         private set
 
+    /** R206 — the id the page minted for the job it just asked the service to start, so a service
+     * that cannot even get its notification up can refuse *that* job by name. */
+    @Volatile
+    private var pendingId = -1L
+
     fun label(key: String, fallback: String): String = labels.optString(key).ifEmpty { fallback }
 
     fun addObserver(observer: (String) -> Unit) = observers.addIfAbsent(observer)
@@ -85,8 +91,12 @@ object ExportHost {
             return -1
         }
         val intent = Intent(context, ExportService::class.java).putExtra(ExportService.EXTRA_REQUEST, requestJson)
+        pendingId = id
         val started = runCatching { ContextCompat.startForegroundService(context, intent) }.isSuccess
-        if (!started) publishRefusal(errorPayload(id, "startFailed", label("startFailed", "后台任务起不来，请重试")))
+        if (!started) {
+            pendingId = -1L
+            publishRefusal(errorPayload(id, "startFailed", label("startFailed", "后台任务起不来，请重试")))
+        }
         return if (started) id else -1
     }
 
@@ -100,6 +110,8 @@ object ExportHost {
      */
     internal fun run(requestJson: String): Long {
         val id = runCatching { JSONObject(requestJson).optLong("id", 0L) }.getOrDefault(0L)
+        // The job is the engine's now, with its own failure payloads addressed to its own id.
+        pendingId = -1L
         return engine.start(requestJson) { payload ->
             publish(runCatching {
                 val json = JSONObject(payload)
@@ -146,6 +158,18 @@ object ExportHost {
 
     fun markDelivered() {
         delivered = true
+    }
+
+    /**
+     * R206 — the promise the service could not make. `submit()` already knows which job asked for it,
+     * so the refusal is addressed to that id and reaches the page as the same terminal payload any
+     * other failure would; the fallback wording is only for a language dictionary that predates the
+     * code.
+     */
+    fun reportStartFailure(code: String, message: String) {
+        val id = pendingId
+        if (id <= 0L) return
+        publishRefusal(errorPayload(id, code, message))
     }
 
     fun statusJson(): String {
@@ -202,6 +226,7 @@ class ExportService : Service() {
         // channel it first arrived with, so re-posting 4242 on the result channel would stay silent.
         private const val RESULT_NOTIFICATION_ID = 4243
         private const val WAKE_LOCK_TAG = "tessera:export"
+        private const val TAG = "ExportService"
 
         // Long enough for any honest export, short enough that a service which dies without
         // releasing cannot leave the SoC awake indefinitely.
@@ -210,6 +235,9 @@ class ExportService : Service() {
 
     private var lastRequest: String? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    // Whether this instance ever got its foreground promise. `onStartCommand` still runs after a
+    // refused `onCreate`, and an encode without a promise is the thing being prevented.
+    private var promised = false
     private val mainHandler = Handler(Looper.getMainLooper())
     private val observer: (String) -> Unit = { payload -> render(payload) }
 
@@ -221,12 +249,26 @@ class ExportService : Service() {
         // Inside the ten-second window the system gives a started foreground service, and before
         // any decoding starts: a notification that says 「准备导出…」 for a frame is honest, while
         // an invisible job that has not been promised yet is exactly the failure being fixed.
-        promote(buildProgress(ExportHost.label("preparing", "准备导出…"), 0))
+        //
+        // R206: `startForeground` is allowed to throw — a dataSync quota exhausted for the day on
+        // Android 14+, a ROM that refuses the type, a task already removed. Left bare, that throw
+        // happened in `onCreate` and took the whole process with it: the page, the WebView, the
+        // scan that was running. So the promise is asked for, and refused, in the open — and no
+        // frame is decoded without it.
+        if (!promote(buildProgress(ExportHost.label("preparing", "准备导出…"), 0))) {
+            // 同一个用户可见的结局（后台任务起不来），所以用页面里已有那句话，不新增一个只有 Kotlin
+            // 认识的码 —— 没有译文的码会在 toast 上漏出英文原文。
+            ExportHost.reportStartFailure("startFailed", ExportHost.label("startFailed", "后台导出任务起不来，请重试"))
+            stopSelf()
+            return
+        }
+        promised = true
         ExportHost.addObserver(observer)
         acquireWakeLock()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!promised) return START_NOT_STICKY
         if (intent?.action == ACTION_CANCEL) {
             // The notification's own button: it may arrive after the page stopped listening, which
             // is the entire reason the action is a service intent rather than a JS call.
@@ -257,6 +299,10 @@ class ExportService : Service() {
 
     override fun onDestroy() {
         ExportHost.removeObserver(observer)
+        // R206: 前台身份没了，编码就不该继续。系统停服务（配额、用户手停、内存压力）之后这个进程
+        // 随时可能被杀，而半截的 mp4 没有 moov —— 相册里就是一个 0 秒、点开报错的文件。取消会让引擎
+        // 自己收尾：写出过帧的按「已写入的片段保存在文件里」留着，一段没写的删掉。
+        if (ExportHost.isBusy()) ExportHost.cancel(0)
         runCatching { wakeLock?.takeIf { it.isHeld }?.release() }
         wakeLock = null
         super.onDestroy()
@@ -322,12 +368,16 @@ class ExportService : Service() {
         )
     }
 
-    private fun promote(notification: Notification) {
+    private fun promote(notification: Notification): Boolean = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        true
+    }.getOrElse {
+        Log.w(TAG, "startForeground refused", it)
+        false
     }
 
     private fun buildProgress(message: String, percent: Int): Notification =

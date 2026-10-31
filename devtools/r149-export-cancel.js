@@ -11,13 +11,18 @@
   if (!v.eventGroups || !v.eventGroups.length) return JSON.stringify({ fatal: 'no events' });
   if (!v.currentEvent) { await v.playEvent(v.eventGroups.find(g => (g.segments || []).length)); await sleep(3000); }
 
-  // 捕获原生推来的终止载荷（链在页面自己的处理前面，不替换它的行为）。
-  const prev = window.__tdashcamExportProgress;
+  // 捕获原生推来的终止载荷 —— 钩**方法**，不钩 `window.__tdashcamExportProgress` 那个全局名：
+  // 面板每次装配都会把全局重新指给页面自己（script.js:24942），钩在前面装的就会被顶掉，
+  // 于是这条判据只在「面板恰好已经装配过」的会话里通过，冷启动那一轮拿到的是
+  // 「30 s 内没有终止载荷」—— 判据连自己的钩子还在不在都没查（本轮实测踩过）。
   window.__r149 = null;
-  window.__tdashcamExportProgress = (p) => {
-    try { const o = JSON.parse(p); if (o && ['done', 'cancelled', 'error'].includes(o.phase)) window.__r149 = o; } catch (e) {}
-    if (typeof prev === 'function') prev(p);
+  const orig = v.onPhoneExportProgress.__r149raw || v.onPhoneExportProgress.bind(v);
+  const hook = (p) => {
+    try { if (p && ['done', 'cancelled', 'error'].includes(p.phase)) window.__r149 = p; } catch (e) {}
+    return orig(p);
   };
+  hook.__r149raw = orig;
+  v.onPhoneExportProgress = hook;
 
   await v.showPhoneExportModal();
   for (let i = 0; i < 30 && !document.getElementById('phoneExportModal').classList.contains('show'); i++) await sleep(100);
@@ -38,6 +43,7 @@
   await sleep(400);
   if (v.phoneExportPlan().error) return JSON.stringify({ fatal: v.phoneExportPlan().error });
 
+  if (v.onPhoneExportProgress.__r149raw !== orig) return JSON.stringify({ fatal: '钩子没挂上（面板重新装配过，得重装）' });
   await v.startPhoneExport();
   for (let i = 0; i < 40 && !v.peJob; i++) await sleep(50);
   await sleep(120);                       // 尽量在头几百毫秒内取消
