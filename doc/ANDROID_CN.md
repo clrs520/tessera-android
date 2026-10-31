@@ -16070,9 +16070,91 @@ sha256 `0bf0493b650e0f761e300b27d2f9c237b608480aac111a5320e63285519c33ce`。
 ## 5. 剩下的账
 
 第 3 批扫描与删除的失败路径（catch 里 await 后不复查 token、`scanPoll` 泄漏、
-`lib.rs:986/989` 白名单失败不回滚、`read_sidecars` 无字节上限）。
+`lib.rs:986/989` 白名单失败不回滚、`read_sidecars` 无字节上限）—— **已在 R205（1.2.330）落地**。
 第 4 批原生生命周期（`startForeground` 未兜底、导出无墙钟看门狗、同步桥仍做 FUSE、`.part` 改名、
 `ExportEngine.kt:719` 用 `currentTimeMillis` 节流）。
 第 5 批 UI（四处禁用态 `opacity`、目录浏览器不吃 `--kb-h`、32/40 px、`inert` 名单、玻璃采样白跑）。
 封存索引还留一条已知边界：**开机恢复那一扫仍可能答 10 分钟内的旧清单**（故意的取舍 —— 2 TB 盘上
 「问 mtime」实测多花 ~10 s）；真机若还有人报「早上打开看不到昨天的片子」，就把这条也改成刷新级。
+
+# R205 —— 第 3 批：扫描「失败了」这一路，会不会把用户刚做好的事踩掉
+
+用户回「请继续」⇒ 第 3 批（扫描与删除的失败路径）。四条都在同一句话上：**出错的这一次扫描，
+有没有权利改动屏幕此刻的状态**。前一批留下的账也在这里一起还 —— `r204-scan-cache.sh` 那五条判据
+本批改成了「同一个目录里多了东西」的形状，不再靠 `rm -rf`（见 §3）。
+
+## 1. 先红：1.2.329 上的读数
+
+`devtools/r205-verify.js` —— 五条全红，四条前置全绿（好目录扫出 3 条、正在用的目录回 206、
+死目录确实抛了、B 确实提交了新路径与新列表、A 确实进了「目录不见了」那一支）：
+
+```
+F3 扫描失败后，原来那个目录仍然放行（白名单换回来了） = 403
+F1 迟到的失败回滚不再盖掉当前目录 = /storage/emulated/0/TeslaCamReg   ← 该是 TeslaCamMulti
+F1 迟到的失败回滚不再盖掉当前列表
+F1 迟到的那次调用如实回报「我没落地」 = undefined                      ← 该是 false
+F2 扫描抛异常后没有留下 500 ms 的进度轮询 = 3                          ← 1.6 s 里打了三次 IPC
+```
+
+`devtools/r205-sidecar.sh` —— 两条红（6 MiB 的 `event.json` 整份读进内存并解析成功）：
+
+```
+F4 超限那份被跳过（ok=false） = {"ok":true,"city":"杭州"}
+F4 跳过要说明原因，不许静默当「没有这个文件」
+```
+
+## 2. 改了什么（全部只在手机那条流式路径上，桌面一字未动）
+
+| # | 位置 | 根因 → 修法 | 改后 |
+|---|---|---|---|
+| F1 | `script.js:23916/23933/23944` `loadTauriDirectory` 的 catch | `await this.scannedPathGone(path)` 就是「盘还在不在」的一整轮往返（慢 FUSE 几百毫秒、拔盘更久），而 `scanToken` 只在 await **之前**查过一次（R143 那套归属检查没伸进 catch）。⇒ 一次迟到的失败回滚把用户刚切好的目录与列表整个盖回旧值，还把「我没落地」报成 `undefined`。改：gone 分支、非 gone 分支、以及空扫描分支的 `reportEmptyScan` 之后各补一次令牌复查，退出统一 `return false` | 10/0 |
+| F2 | `script.js:23958` `finally` | `scanPoll`（500 ms 打一次 `scan_progress`）只在成功路径清 ⇒ 抛异常就漏在那儿，之后**每一次**扫描的进度行（「读取事件信息 24/30」）都会被它翻回「已扫描 N」，还常驻一条 IPC。改：`finally` 里无条件清 —— 这一拍轮询属于这一次扫描，跟谁的最新无关 | 1.6 s 窗口内 0 次 |
+| F3 | `lib.rs:1011` `scan_media_dir_stream` | 走查**之前**就把媒体服务白名单换成新目录（预览图要趁走查没完就能看图，这是 R156 定的），`let report = result?` 提前返回就换不回来 ⇒ 选一个读不了的文件夹失败后，**正在播的旧目录全部 403**（缩略图、抓帧一起死），而界面还停在旧列表。改：先 `get_allowed_roots()` 存旧值（`stream_server.rs:41` 新增），失败时若这次扫描仍是最新的一次就把白名单交还回去 | 旧目录仍 206 |
+| F4 | `lib.rs:1105/1113` `read_sidecars` | 对 `event.json` 无字节上限：`read_to_string` 整读，而这一条命令一次拿 500 个路径 ⇒ 一块被写坏的盘（塞进去几百 MB）能把安卓进程直接 abort。同类上限 SEI（32 MB `moov`）早就加了，这条是漏的。改：`metadata().len() > 4 MiB` 就不读，回 `ok:false + skipped:"tooBig"` —— 只回一个空 `ok:false` 和「这个事件根本没有 sidecar」长得一模一样，谁都不会去查第二遍 | 超限那份被跳过、正常那份照常读出城市与坐标 |
+
+桌面不受影响的两处说明：`scan_media_dir`（非流式）本来就走查之后再设白名单，没有这个洞；
+`read_sidecars` 在桌面同样有上限，但桌面拿的是 `AppCache` 之外用户自己选的文件夹 —— 一条上限不会
+改变任何合法 sidecar 的结果（`event.json` 实际几 KB）。
+
+## 3. 这一批撞出来的工具坑
+
+- **`adb shell` 字符串里的 `/sdcard/...` 会被 MSYS 改写**成 `<git 安装目录>/sdcard/...`：`adb push`
+  报「1 file pushed」但文件根本没落盘，于是「大那份 `ok===false`」以错误的理由通过。判据脚本一律
+  走 `MSYS_NO_PATHCONV=1` 的包装，并且**加一条会抛的前置**（正常那份读不出来就直接失败），
+  让「夹具没落盘」不能伪装成通过。
+- **同一句话也适用于 `*` 通配**：`adb shell "rm -rf $D/RecentClips/*"` 静默失效 ⇒ 盘上结构根本没换，
+  「刷新换没换列表」量的是夹具而不是缓存。包装（`adb_run` / `adb_push`）都带 `MSYS_NO_PATHCONV=1`
+  之后通配才真的落到设备上。本批把 `r204-scan-cache.sh` 改成**只做增量**（保留类目目录本身，
+  只清它里面的平铺文件 + 追加一小时），顶层目录名不动 ——
+  只有「同一个目录里多了东西」才是封存索引挡得住的形状。
+- **APP 进程对刚被换过的目录有一段 FUSE 旧视图**（实测：`adb ls` 已经是新结构，APP 的扫描还在交
+  旧结构，约 40 s 才跟上）。基线必须「等它自己看见」（本批改判据：最多 10 × 6 s 轮询到
+  `groups:20`），不能假定改完立刻可见 —— 否则后面比的不是缓存，而是这个视图差。
+- **`loadTauriDirectory` 在 `refreshUnchanged` 那条捷径上返回 `false`**（签名没变就算「没变化」，
+  连列表都不重建）。所以「A 返回 false」这一支不能单独当证据，必须**同时**断言当前路径与列表
+  确实是 B 的 —— 判据两组都写了。
+- **第三方测试包会抢前台并把我们 force-stop**：这轮采完红、装回 1.2.330 之后，`com.liangqing.photos`
+  自己起在前台（`mCurrentFocus` 是它），我们进程直接没了，表现是 `cdp-eval` 报「app is not running」。
+  已 `pm disable-user` 掉它；跑判据前照旧要确认 `mCurrentFocus`。
+- **`user_rotation` 要先 `accelerometer_rotation 0` 才生效**（这轮又踩一次）：`accelerometer_rotation`
+  会被别的判据改回 1，此时写 `user_rotation 1` 完全没反应，`innerWidth` 还是 412 —— 只认 `innerWidth`。
+
+## 4. 装机验收（1.2.330）
+
+改前红（§1，1.2.329 上采的，同一份判据）⇒ 改后本批两套 **10/0** + **4/0**，回归：
+`r204-scan-cache` **5/0**、`r204-verify` **9/0**、`r203-verify` **12/0**、`r201-dragselect` **11/0**、
+`r186-batch-delete` **17/0**、`r185-scroll-chip` **5/0**、`r182-note` **24/0**、
+`r102-verify` 竖屏 **93/0**、`r102-verify-landscape` **36/0**、`r173-verify` **40/0** ——
+合计 **266 条断言 0 红**（这一批的 14 条 + 回归 252 条全在最终装机的 1.2.330 上重测过一遍）。
+
+`Tessera-1.2.330.apk` 28,542,359 B，md5 `54678bb242db795c5813e373e0bd062e`，
+sha256 `8bfed292446eb1cca7232d289b318c8cd4e726bf21cfcea6f2615bd3aa35c499`。
+
+新夹具 `/sdcard/TeslaCamR205/SavedClips`（两份 `event.json`，一份 6 MiB，建法写在判据里）。
+流媒体 token 是「整份文件可读」的能力，**绝不写进文档或判据输出** —— F3 只回 HTTP 状态码。
+
+## 5. 剩下的账
+
+第 4 批原生生命周期（`startForeground` 未兜底、`onDestroy` 不取消任务、导出无墙钟看门狗、
+同步桥仍做 FUSE、`ThumbFetcher` executor、`.part` 改名、`ExportEngine.kt:719` 用 `currentTimeMillis` 节流）。
+第 5 批 UI（四处禁用态 `opacity`、目录浏览器不吃 `--kb-h`、32/40 px、`inert` 名单、玻璃采样白跑）。
