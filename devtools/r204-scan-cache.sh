@@ -47,18 +47,32 @@ read_state() {
   CDP_TIMEOUT_MS=120000 node devtools/cdp-eval.mjs --file "$(cygpath -w "$P")"
 }
 
-echo "== 0) 记账：先把缓存作废再扫一次，让「盘上的旧结构」成为缓存里的内容"
-adb_run "rm -rf $D; mkdir -p $D/RecentClips; i=0; while [ \$i -lt 20 ]; do d=\$(printf '2026-08-01_10-%02d-00' \$i); mkdir -p $D/RecentClips/\$d; for c in front back left_repeater right_repeater left_pillar right_pillar; do touch $D/RecentClips/\$d/\$d-\$c.mp4; done; i=\$((\$i+1)); done"
-make_probe reset
-read_state >/dev/null
+echo "== 0) 把盘换成「旧结构」：RecentClips 里 20 个「一分钟一个目录」的事件"
+# 只动目录里的东西、不删 `RecentClips` 本身，而且不用 `rm -rf $D/RecentClips/*`：那条命令在
+# adb shell 里被 MSYS 改写成了 `<git安装>/sdcard/...`，静默失败 ⇒ 盘上根本没换结构，
+# 于是「刷新换没换列表」量的是夹具而不是缓存。
+adb_run "mkdir -p $D/RecentClips; rm -f $D/RecentClips/*.mp4; i=0; while [ \$i -lt 20 ]; do d=\$(printf '2026-08-01_10-%02d-00' \$i); mkdir -p $D/RecentClips/\$d; for c in front back left_repeater right_repeater left_pillar right_pillar; do touch $D/RecentClips/\$d/\$d-\$c.mp4; done; i=\$((\$i+1)); done; sync"
 
-echo "== 1) 旧结构基线：RecentClips 里 20 个「一分钟一个目录」的事件"
+echo "== 1) 等 APP 真的看见这份基线（顺带把缓存记成它）"
+# APP 进程在 FUSE 上对刚被换过的目录会有一段旧视图（实测：`adb ls` 已经是新结构，APP 的扫描
+# 还在交旧结构，~40 秒后才跟上）。所以基线要「等它自己看见」，不能假定改完立刻可见 ——
+# 否则后面比的不是缓存，而是这个视图差。
+make_probe reset
+BASE=""
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  BASE=$(read_state); echo "   等基线（$i）：$BASE"
+  case "$BASE" in *'"groups":20'*) break;; esac
+  sleep 6
+done
+
+echo "== 1b) 封存索引下的普通扫描（这一次允许还是旧答案）"
 make_probe plain
 OLD=$(read_state); echo "$OLD"
 
-echo "== 2) 盘外换成新结构：同一个 RecentClips 目录里改成 60 分钟的平铺文件"
-echo "   （顶层目录名不变 —— 车的滚动缓冲区就是这样；换到别的类目下根目录一定会被 read_dir 看见，测不出缓存）"
-adb_run "rm -rf $D; mkdir -p $D/RecentClips; i=0; while [ \$i -lt 60 ]; do d=\$(printf '2026-08-02_11-%02d-00' \$i); for c in front back left_repeater right_repeater left_pillar right_pillar; do touch $D/RecentClips/\$d-\$c.mp4; done; i=\$((\$i+1)); done"
+echo "== 2) 盘外新增一小时（车就是这么写的）：RecentClips 里多出 60 个平铺分钟"
+# 顶层目录名不变；新增的是它里面的条目 —— 根目录 `read_dir` 每次都真读，所以「换到别的类目下」
+# 那种改法测不出缓存，只有「同一个目录里多了东西」才是封存索引挡得住的形状。
+adb_run "i=0; while [ \$i -lt 60 ]; do d=\$(printf '2026-08-02_11-%02d-00' \$i); for c in front back left_repeater right_repeater left_pillar right_pillar; do touch $D/RecentClips/\$d-\$c.mp4; done; i=\$((\$i+1)); done; sync"
 
 echo "== 3) 普通扫描（不刷新）：这次允许还是旧答案 —— 它证明缓存真的在生效"
 STALE=$(read_state); echo "$STALE"
@@ -76,8 +90,8 @@ ok("前置：基线扫出来是 20 个事件，且缓存已经记下这份清单
 ok("前置：不刷新时确实还在答封存索引（否则这一步没有可测性）",
    staleS.sealed === true && staleS.groups === 20 && staleS.loaded === false, JSON.stringify(staleS));
 ok("R203 下拉刷新不再信封存索引（sealed=false）", freshS.sealed === false, freshS.sealed);
-ok("R203 下拉刷新问到了盘上的新结构（1 个 60 段事件）",
-   freshS.groups === 1 && freshS.maxSeg === 60, `${freshS.groups}/${freshS.maxSeg}`);
+ok("R203 下拉刷新问到了盘上新增的一小时（20 个旧事件 + 1 个 60 段新事件）",
+   freshS.groups === 21 && freshS.maxSeg === 60, `${freshS.groups}/${freshS.maxSeg}`);
 ok("R203 下拉刷新真的换了列表（不是「没有变化」那条捷径）", freshS.loaded === true, freshS.loaded);
 console.log(JSON.stringify(out, null, 1));
 process.exit(out.fail.length ? 1 : 0);

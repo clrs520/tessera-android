@@ -35,6 +35,18 @@ pub fn set_allowed_roots(roots: Vec<String>) {
     *allowed_roots().lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = canonical;
 }
 
+/// R205 — 一次扫描在走查之前就把白名单换成它自己的目录（预览图要趁走查没完就能看图）。那个目录
+/// 要是根本读不了，走查就地返回错误，白名单却停在「谁都不许」上，而界面还挂在旧目录的列表上 ——
+/// 正在放的那一路、缩略图、抓帧全变 403。回滚要先读得到旧值。
+pub fn get_allowed_roots() -> Vec<String> {
+    allowed_roots()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
 fn is_allowed_path(path: &str) -> bool {
     let roots = allowed_roots().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // Path::starts_with compares whole components, so /a/TeslaCamX does not match /a/TeslaCam.

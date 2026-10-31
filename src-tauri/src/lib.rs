@@ -1008,10 +1008,21 @@ async fn scan_media_dir_stream(
     // The preview draws `thumb.png` and can start a clip while the walk is still running, so the
     // media server has to know this root before the first batch lands. Registering it after the
     // walk (what `scan_media_dir` does) made every preview image a 403.
+    let previous_roots = stream_server::get_allowed_roots();
     stream_server::set_allowed_roots(vec![root.clone()]);
     let result = blocking(move || scan_tree_with(&path, Some((&app, scan_id)), allow_sealed)).await;
     SCAN_RUNNING.store(false, Ordering::Relaxed);
-    let report = result?;
+    let report = match result {
+        Ok(report) => report,
+        Err(e) => {
+            // R205 — 这个目录连顶层 `read_dir` 都没过（拔了、路径打错了），白名单就不能留在
+            // 「只有它」上：屏幕上是上一个目录的列表，播放器要的还是它的文件。
+            if LATEST_SCAN_ID.load(Ordering::Relaxed) == scan_id {
+                stream_server::set_allowed_roots(previous_roots);
+            }
+            return Err(e);
+        }
+    };
     if LATEST_SCAN_ID.load(Ordering::Relaxed) == scan_id {
         stream_server::set_allowed_roots(vec![root]);
     }
@@ -1055,6 +1066,9 @@ struct SidecarRead {
     lat: Option<f64>,
     lon: Option<f64>,
     reason: Option<String>,
+    /// R205 — 为什么这份没读（现在只有「大到不合理」一种）。不能只回一个空的 `ok:false`：
+    /// 那和「这个事件根本没有 sidecar」长得一模一样，谁都不会去查第二遍。
+    skipped: Option<String>,
 }
 
 fn sidecar_string(value: &serde_json::Value, key: &str) -> Option<String> {
@@ -1081,19 +1095,29 @@ fn parse_sidecar(text: &str) -> Option<SidecarRead> {
         lat: sidecar_number(&value, "est_lat"),
         lon: sidecar_number(&value, "est_lon"),
         reason: sidecar_string(&value, "reason"),
+        skipped: None,
     })
 }
+
+/// R205 — `event.json` 是几 KB 的小文件，读它的命令一次拿 500 个路径。一块被别的设备写坏、
+/// 或者根本就是别人家的日志的盘，可以在这儿塞进几百 MB：`read_to_string` 没有上限就是
+/// 整份进内存，安卓直接 abort 掉进程。同一类上限在 SEI（32 MB `moov`）那里已经加过了。
+const MAX_SIDECAR_BYTES: u64 = 4 * 1024 * 1024;
 
 #[tauri::command]
 async fn read_sidecars(paths: Vec<String>) -> Result<Vec<SidecarRead>, String> {
     blocking(move || {
         Ok(paths
             .iter()
-            .map(|path| {
-                std::fs::read_to_string(path)
+            .map(|path| match std::fs::metadata(path) {
+                Ok(meta) if meta.len() > MAX_SIDECAR_BYTES => SidecarRead {
+                    skipped: Some("tooBig".to_string()),
+                    ..Default::default()
+                },
+                _ => std::fs::read_to_string(path)
                     .ok()
                     .and_then(|text| parse_sidecar(&text))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
             })
             .collect::<Vec<SidecarRead>>())
     })

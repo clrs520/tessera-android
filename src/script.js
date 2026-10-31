@@ -23911,6 +23911,9 @@ class TeslaCamViewer {
             } else {
                 if (scanToken !== this.scanToken) return false;
                 await this.reportEmptyScan(path);
+                // R205: `reportEmptyScan` 自己也要问一轮原生（盘还在不在）—— 那期间用户可能已经
+                // 切到别的目录了，这里再写就会把新目录的路径盖成旧的回滚值。
+                if (scanToken !== this.scanToken) return false;
                 // R85: an empty scan loads nothing either — `reportEmptyScan` decides what to say,
                 // not what to remember.
                 this.lastScannedPath = previousPath;
@@ -23924,6 +23927,10 @@ class TeslaCamViewer {
             // blaming the read — but only on a genuine "no such file", because a list blocked
             // by permission is still a list the user can see and must not lose.
             if (await this.scannedPathGone(path)) {
+                // R205: 上面那个 await 就是「盘还在不在」的一轮往返，慢 FUSE 上几百毫秒、拔盘时
+                // 更久；这期间用户切了新目录的话，这次迟到的回滚会把新目录的路径与列表整个盖回
+                // 旧的 —— R143 那套归属检查当时只钉在 await 之前。
+                if (scanToken !== this.scanToken) return false;
                 // Put the folder that is still there back in the header before pruning, so the
                 // chip that stays lit is the one whose clips are actually on screen.
                 this.lastScannedPath = previousPath;
@@ -23932,8 +23939,9 @@ class TeslaCamViewer {
                     this.filterAndRender();
                 }
                 await this.forgetRemovedVolumes([path]);
-                return;
+                return false;
             }
+            if (scanToken !== this.scanToken) return false;
             // R84: any other failed scan leaves the previous list on screen, so the remembered
             // path has to go back with it. It used to keep the folder that just threw — the
             // header and the on-state chip named a directory whose clips were never loaded.
@@ -23944,6 +23952,10 @@ class TeslaCamViewer {
             }
             this.showToast(translations.scanReadFailed.replace('{msg}', e.message || String(e)), 'error');
         } finally {
+            // R205: 成功路径在扫描返回后清过一次，异常路径没走到 —— 漏下来的 setInterval 每 500 ms
+            // 打一次 `scan_progress`，还会把*下一次*扫描的进度行（「读取事件信息 24/30」）翻回文件计数。
+            // 无条件清：这一拍的轮询属于这一次扫描，跟谁的最新无关。
+            if (scanPoll) clearInterval(scanPoll);
             if (scanObserver) {
                 try { scanObserver.disconnect(); } catch (e) { /* already gone */ }
             }
