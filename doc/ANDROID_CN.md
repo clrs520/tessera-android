@@ -15927,3 +15927,74 @@ sha256 `5aa39a3afd584bc0eb3cf1039561711a58fbf6dae979eb06472496f5395916f8`。
 - v1.2.327 的 Release 正文加了包名/体积/SHA-256 与「覆盖安装即升级」，再往下才是原来的 R201 技术说明。
 - 渲染核对：`gh api -H "Accept: application/vnd.github.html" repos/.../readme` 里七张图的 `<img ... width="230">` 都保留，
   表格 + HTML 混排在 GitHub 上不塌。
+
+# R203 —— 全面审计（六路并行）与第 1 批修复
+
+用户要求「全面排查代码 / 功能 / 交互 / UI」。做法沿用 R143 / R147：**六路只读子代理并行**
+（播放引擎与同步、手势与交互、列表 / 扫描 / 删除 / 持久化 / i18n、Rust 层、Kotlin 与导出、UI / CSS / 可达性），
+共回 45 条候选；**我逐条回读调用链核实**，只把核实过的当结论，其余标「待实测」。
+清单已交用户，用户拍板「请开始吧」⇒ 按批次推，本轮是**第 1 批**。
+
+## 1. 第 1 批改了什么（五条，全部手机档门控，桌面一字未动）
+
+| # | 位置 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | `script.js:21521`（`flushPendingDelete`） | 删除的脏标记写给 `this.lastScannedPath`。撤销保险丝有 6 s，足够用户切到别的目录 ⇒ 真删的盘 A **没被标脏**、正看着的盘 B 被误标。A 的目录清单继续 `sealed`（`lib.rs:1081` 只写 `.dirty`），下次扫 A 连 mtime 都不问 ⇒ **已删事件回到列表、点开是坏文件，而且这次扫描会把这份幽灵清单原样存回去**（自我固化）。R143 已经给 job 记了 `folderPath`，撤销路径 [:21457](#) 正是用它挡「落错盘」，唯独这一行漏了 | 改 `job.folderPath \|\| this.lastScannedPath` |
+| 2 | `script.js:21098`（`edgeScroll`） | 边缘自动滚每帧 `scrollTop ±10px`，不看时间差 ⇒ 60 Hz 是 600 px/s，120 Hz（小米 14）就是 1200 px/s。同一只手停在边缘，**刷新越快勾得越多** | 改成 `EDGE_SPEED = 600` px/秒，用 rAF 时间戳累加 `carry`，`dt` 封顶 50 ms（退后台回来不补一整段） |
+| 3 | `script.js:21054`（`anchor`） | anchor 存的是 `lastFilteredEvents` 的**下标**，而扫描批次 / 换排序 / 改筛选会整表重排 ⇒ 下标指到另一条事件，下一步就是删除 | anchor 改记 `eventId`，每次 `paint` 前按 id 现算下标 |
+| 4 | `script.js:6568`（列表 `render`） | 整表重画会摘掉手指底下那张卡 ⇒ 隐式指针捕获丢失，拖选再也收不到 `pointerup`，`drag-selecting` 挂着、`touchmove` 一直 `preventDefault` ⇒ **列表滚不动** | `render()` 开头 `this.viewer.cancelDragSelect?.()` |
+| 5 | `script.js:19369`（下拉刷新 `touchmove`） | 一次「按住再拖」浏览器同时发 touch 与 pointer 两套事件；`pulling` 在 touchstart 就成立且没人复位 ⇒ 刷新转圈在手指底下胀起来，抬手**触发一次不请自来的重扫** | 拖选一旦 active，这一拉就地作废（复位 `pulling`/`distance`/spinner） |
+
+## 2. 判据：`devtools/r203-verify.js`（先红后绿）
+
+改前在 1.2.327 上跑，**五条 bug 断言全红、前置全绿**（不是判据没跑起来）：
+
+```
+RED G1 脏标记落在被删的那个根 = ["/sdcard/TeslaCamReg"]
+RED G2 慢帧率下滚速没有按比例掉 = 16ms=311px/s 48ms=173px/s
+RED G3 挤到前面的事件没被当成 anchor 勾上（3 条被误勾）
+RED G3c 整表重画后拖选立即结束 = true/true
+RED G4 拖选期间刷新指示器没有胀起来 = 34px / 抬手重扫 1 次
+```
+
+改后在 1.2.328 上 **12/0**：G1 变成 `["/sdcard/TeslaCamR203"]`；G2 16 ms=601 px/s、48 ms=512 px/s（比值 1.17）；
+G3 选中集只剩 anchor 往下那 7 条；G3c `false/false`；G4 spinner 高度空、重扫 0 次。
+
+G2 的判据写法值得记一句：**不去量真机帧率，而是自己 shim `requestAnimationFrame`**
+（`setTimeout(cb, 16)` vs `setTimeout(cb, 48)`）量两种「帧率」下的 px/s。
+按帧走的实现必然按比例掉，按时间走的不会 —— 这条断言与设备刷新率无关，AVD 上也能证。
+
+顺带把 R201 的拖选判据收进仓库（`devtools/r201-dragselect.js`，上轮只在 /tmp 里跑过），
+并把「夹具是 8 个事件」这类**写死条数**的断言改成与夹具无关。
+
+## 3. 夹具与本轮踩到的坑
+
+- 新增 `/sdcard/TeslaCamR203`（3 个 SavedClips 事件，0 字节 clip 足够列表与删除用）。G1 会真删一条，
+  跑前补夹具的命令写在判据文件头。
+- **`user_rotation` 要先关掉 `accelerometer_rotation` 才生效**：本轮两次「转不动横屏」都是这个原因
+  （`dumpsys window` 里 `mDisplayRotation=ROTATION_0` 才看出来）。R143 那条「先回 0 再置 1」补上这一半。
+- **第三方相册又抢前台**：`pm disable` 之后 `com.liangqing.photos` 仍回到前台一次，把横屏套件跑到一半
+  冻成「timed out waiting for the WebView to answer」。每次跑套件的固定前置仍然是
+  `am force-stop` + 确认 `topResumedActivity` + 记 `/proc/uptime`。
+- **判据「基准：卡片有数据」把工具的失败记成了产品的失败**：我的探针把 `lastScannedPath` 换成了
+  0 字节夹具，`r102-verify` 播的是「当前目录第一条事件」⇒ 没有遥测。改成跑前
+  `loadTauriDirectory('/sdcard/TeslaCamReg')` 就回 93/0。**跑播放类判据前必须显式指定夹具目录**，
+  别信上一个脚本留下的状态。
+
+## 4. 装机验收（1.2.328）
+
+`r203-verify` **12/0**、`r201-dragselect` **11/0**、`r186-batch-delete` **17/0**、
+`r185-scroll-chip` **5/0**、`r102-verify` 竖屏 **93/0**、`r102-verify-landscape` **36/0**。
+
+`Tessera-1.2.328.apk` 28,537,503 B，md5 `b39d65238ffe970fcd9cf313c10f760e`，
+sha256 `9d6233b836de835124d423436a30033e150f328290799733414a34be71a3c8d5`。
+
+## 5. 审计剩下的账（未开工，按批次继续）
+
+第 2 批 R200 补量三条（`rebuildRulerInPlace` 没把尺交回播放器、会抹掉剪辑区间、速度曲线错位）——
+**这条里含我自己的验收盲区**：R200 量的是 `event.*`，而指针 / 进度 / 纠偏读的是 `player.*`，
+判据全绿而真时长其实没送到目的地。第 3 批扫描与删除的失败路径（catch 里 await 后不复查 token、
+`scanPoll` 泄漏、`lib.rs` 白名单失败不回滚、`read_sidecars` 无上限）。
+第 4 批原生生命周期（`startForeground` 未兜底、导出无墙钟看门狗、同步桥仍做 FUSE、`.part` 改名）。
+第 5 批 UI（四处禁用态 `opacity`、目录浏览器不吃 `--kb-h`、32/40 px、`inert` 名单、玻璃采样白跑）。
+未核实与已判「不采信」的清单在 `project-tdashcam-r203-audit` 记忆里。

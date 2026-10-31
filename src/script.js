@@ -6566,6 +6566,10 @@ class VideoListComponent {
     }
 
     render(events, { keepScroll = false } = {}) {
+        // R203: 整表重画会把手指底下那张卡摘掉 —— 隐式指针捕获随之丢失，拖选再也收不到 pointerup，
+        // `drag-selecting` 一直挂着、`touchmove` 一直 preventDefault，用户看到的是列表滚不动。
+        // 这一画不是那一次按住的结果了，就地收手。
+        this.viewer.cancelDragSelect?.();
         const lang = this.viewer.currentLanguage;
         const translations = i18n[lang];
         // A fill queued for the previous list must never append into this one.
@@ -19368,6 +19372,16 @@ class TeslaCamViewer {
 
         list.addEventListener('touchmove', (e) => {
             if (!pulling) return;
+            // R203: 一次按住再拖，浏览器同时给 touch 和 pointer 两套事件。按下 180 ms 后拖选
+            // 接管了这根手指，下拉刷新还当自己在被拉 —— 刷新转圈在手指底下越胀越高，抬手就是一
+            // 次不请自来的重扫。拖选一旦开始，这一拉就地作废。
+            if (this.dragSelectState && this.dragSelectState.active) {
+                pulling = false;
+                distance = 0;
+                spinner.style.height = '';
+                spinner.classList.remove('ready');
+                return;
+            }
             const dy = e.touches[0].clientY - startY;
             if (dy <= 0 || list.scrollTop > 0) {
                 pulling = false;
@@ -21044,13 +21058,19 @@ class TeslaCamViewer {
         const HOLD_MS = 180;
         const SLOP_PX = 10;
         const EDGE_PX = 56;
-        const EDGE_STEP = 10;
+        // R203: 边缘自动滚按 px/秒 算，不按 px/帧。10 px/帧在 60 Hz 是 600 px/s，在 120 Hz 的机型上
+        // 就成了 1200 px/s —— 同一只手停在边缘，刷新越快勾得越多，抬手时早就越过想要的范围了。
+        const EDGE_SPEED = 600;
         let timer = 0;
         let startX = 0;
         let startY = 0;
-        let anchor = -1;
+        // R203: anchor 记 eventId，不记下标。扫描批次、换排序、改筛选都会整表重排，
+        // 下标会指到另一条事件身上，而下一步就是删除。
+        let anchorId = null;
         let base = null;
-        const state = this.dragSelectState = { active: false, x: 0, y: 0, last: -1, raf: 0 };
+        const state = this.dragSelectState = {
+            active: false, x: 0, y: 0, last: -1, raf: 0, tick: 0, carry: 0,
+        };
 
         const indexOf = (card) => {
             const id = card && card.dataset && card.dataset.eventId;
@@ -21075,9 +21095,11 @@ class TeslaCamViewer {
             return bestD <= 1600 ? best : null;
         };
         const paint = (toIndex) => {
-            if (!state.active || anchor < 0 || toIndex < 0 || toIndex === state.last) return;
-            state.last = toIndex;
+            if (!state.active || toIndex < 0 || toIndex === state.last) return;
             const events = this.lastFilteredEvents || [];
+            const anchor = events.findIndex((e) => e && e.eventId === anchorId);
+            if (anchor < 0) return;
+            state.last = toIndex;
             const lo = Math.min(anchor, toIndex);
             const hi = Math.max(anchor, toIndex);
             this.selection.clear();
@@ -21095,11 +21117,26 @@ class TeslaCamViewer {
             this.updateSelectionUI();
             haptic('light');
         };
-        const edgeScroll = () => {
+        const edgeScroll = (now) => {
             if (!state.active) return;
+            const at = typeof now === 'number' ? now : performance.now();
+            // 首拍没有上一拍可比，按一帧算；被后台冻结后回来的那一拍不能补一整段，封顶 50 ms。
+            const dt = state.tick ? Math.min(50, at - state.tick) : 1000 / 60;
+            state.tick = at;
             const r = list.getBoundingClientRect();
-            if (state.y < r.top + EDGE_PX) list.scrollTop -= EDGE_STEP;
-            else if (state.y > r.bottom - EDGE_PX) list.scrollTop += EDGE_STEP;
+            let dir = 0;
+            if (state.y < r.top + EDGE_PX) dir = -1;
+            else if (state.y > r.bottom - EDGE_PX) dir = 1;
+            if (dir) {
+                state.carry += dir * EDGE_SPEED * dt / 1000;
+                const px = Math.trunc(state.carry);
+                if (px) {
+                    list.scrollTop += px;
+                    state.carry -= px;
+                }
+            } else {
+                state.carry = 0;
+            }
             const card = cardNear(state.x, state.y);
             if (card) paint(indexOf(card));
             state.raf = requestAnimationFrame(edgeScroll);
@@ -21128,10 +21165,14 @@ class TeslaCamViewer {
             timer = setTimeout(() => {
                 timer = 0;
                 if (!this.selectionMode) return;
-                anchor = index;
+                const anchorEvent = this.lastFilteredEvents && this.lastFilteredEvents[index];
+                if (!anchorEvent) return;
+                anchorId = anchorEvent.eventId;
                 base = new Set(this.selection);
                 state.active = true;
                 state.last = -1;
+                state.tick = 0;
+                state.carry = 0;
                 list.classList.add('drag-selecting');
                 // Capture keeps the moves coming once the finger leaves the list, which is exactly
                 // where the edge scroll is steering from. A synthetic pointer (probes) may refuse.
@@ -21171,6 +21212,8 @@ class TeslaCamViewer {
         if (state.raf) cancelAnimationFrame(state.raf);
         state.raf = 0;
         state.last = -1;
+        state.tick = 0;
+        state.carry = 0;
         this.dom.fileList?.classList.remove('drag-selecting');
     }
 
@@ -21517,8 +21560,12 @@ class TeslaCamViewer {
         const gone = new Set(result.ok ? job.targets : (result.deletedPaths || []));
         // R199 — 我们自己在这块盘上删了东西：目录清单缓存不能再「不问 mtime 直接用」，把它标脏，
         // 下一次扫描退回逐目录校验（重扫时会重新封存）。
-        if (gone.size && this.lastScannedPath && isTouchShellRuntime()) {
-            nativeInvoke('scan_index_dirty', { path: this.lastScannedPath }).catch(() => { /* index optional */ });
+        // R203 — 标的是**文件被删的那个根**，不是「现在正看着哪个目录」。撤销保险丝有 6 秒，
+        // 足够用户切到另一块盘；写 `lastScannedPath` 会把新目录标脏、旧目录继续 sealed，
+        // 于是已删的事件回到列表、点开是坏文件，而且这次扫描会把这份幽灵清单原样存回去。
+        const dirtyRoot = job.folderPath || this.lastScannedPath;
+        if (gone.size && dirtyRoot && isTouchShellRuntime()) {
+            nativeInvoke('scan_index_dirty', { path: dirtyRoot }).catch(() => { /* index optional */ });
         }
         // The refresh path fingerprints the scan and rebuilds only on a change, and that fingerprint
         // is written by the scan — a delete that never re-scans leaves the previous one in place. The
