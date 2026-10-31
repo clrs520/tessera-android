@@ -9835,7 +9835,14 @@ class ModernVideoControls {
                 this.viewer.updateLoopABLabel?.();
             }
             this.hideClipFilmstrip();
-            
+            // R203 — 剪辑态里补量到的那几批尺被 `rebuildRulerInPlace` 挡下过（它不许在这一态改尺）。
+            // 现在区间已经收走，把欠的那次重建补上，否则整段事件的尺停在「进剪辑之前」的猜值上。
+            if (this.viewer.rulerRebuildDeferred === this.viewer.currentEvent) {
+                this.viewer.rebuildRulerInPlace(this.viewer.currentEvent);
+            } else {
+                this.viewer.rulerRebuildDeferred = null;
+            }
+
             // Hide confirm button
             if (this.confirmClipBtn) {
                 this.confirmClipBtn.style.display = 'none';
@@ -15588,7 +15595,7 @@ class TeslaCamViewer {
         return out;
     }
 
-    async nativeScanFiles(rootPath, { streamPreview = true } = {}) {
+    async nativeScanFiles(rootPath, { streamPreview = true, refresh = false } = {}) {
         const invokeStarted = performance.now();
         // R168 — the progressive preview. The native walk emits `scan-batch` while it runs; the
         // listener below turns each batch into cards, so the newest events are readable in about a
@@ -15618,7 +15625,7 @@ class TeslaCamViewer {
         }
         let report;
         try {
-            report = await nativeInvoke('scan_media_dir_stream', { path: rootPath, scanId });
+            report = await nativeInvoke('scan_media_dir_stream', { path: rootPath, scanId, refresh });
         } finally {
             if (unlisten) {
                 try { await unlisten(); } catch (e) { /* already gone */ }
@@ -17229,7 +17236,12 @@ class TeslaCamViewer {
      * telemetry. Called once per segment on a phone, once in total on desktop.
      */
     publishSpeedGraph(event, allSegmentsMetadata, segmentDurations) {
-        this.videoControls.drawSpeedGraph(allSegmentsMetadata, segmentDurations);
+        // R203 — 形参是开事件那一刻抄下的那份 durations；后台补量重建尺时 `calculateEventDurations`
+        // 换新数组（:8987），而样本的 `segmentStart` 是逐段现读的（新尺）。轴按旧尺、峰按新尺，点下去
+        // 的位置和看着的峰就不是同一秒。以「这个事件现在这把尺」为准。
+        const ruler = event === this.currentEvent && event.segmentDurations?.length
+            ? event.segmentDurations : segmentDurations;
+        this.videoControls.drawSpeedGraph(allSegmentsMetadata, ruler);
         // The route map needs the same decode the speed graph already paid for, so the samples
         // stay on the event instead of a second pass over every one-minute file.
         event.telemetrySamples = allSegmentsMetadata.flat();
@@ -20799,22 +20811,35 @@ class TeslaCamViewer {
         }
         if (!todo.length) return;
         const run = (this.rulerSweepRun = (this.rulerSweepRun || 0) + 1);
+        let failures = 0;
         const step = async () => {
             if (run !== this.rulerSweepRun || event !== this.currentEvent) return;
             const batch = todo.splice(0, RULER_SWEEP_BATCH);
             if (!batch.length) return;
-            let values;
+            let values = null;
             try {
                 values = await nativeInvoke('probe_durations', { paths: batch.map(item => item.path) });
-            } catch (e) {
-                return; // a shell without the command keeps the 60 s guess, and so does the ruler
+            } catch (e) { /* 桥没答这一批，下面按「没答」处理 */ }
+            if (!Array.isArray(values)) {
+                // R203 — 原来这里 `return`：桥偶尔拒绝一次（或答了个非数组），整轮补量就停在第一批，
+                // 后面 1 300 段永远是 60 秒的猜值，而且这一批早被 `splice` 摘走，重试也捡不回来。
+                // 现在退回队首再问一次；连续两批都没答才收手 —— 老引擎根本没有这条命令，别空转。
+                if (++failures >= 2) return;
+                todo.unshift(...batch);
+                setTimeout(step, RULER_SWEEP_GAP_MS);
+                return;
             }
-            if (run !== this.rulerSweepRun || event !== this.currentEvent || !Array.isArray(values)) return;
+            failures = 0;
+            if (run !== this.rulerSweepRun || event !== this.currentEvent) return;
             batch.forEach((item, k) => {
                 const seconds = (Number(values[k]) || 0) / 1000;
                 if (seconds > 0) event.segments[item.index].duration = seconds;
             });
             await this.rebuildRulerInPlace(event);
+            // 最后一批被 seek/剪辑态挡下的话就没人再叫它了：整轮跑完再补一次（一次为限）。
+            if (!todo.length && this.rulerRebuildDeferred === event) {
+                setTimeout(() => { this.rebuildRulerInPlace(event); }, RULER_SWEEP_START_MS);
+            }
             if (todo.length) setTimeout(step, RULER_SWEEP_GAP_MS);
         };
         setTimeout(step, RULER_SWEEP_START_MS);
@@ -20828,12 +20853,40 @@ class TeslaCamViewer {
     async rebuildRulerInPlace(event) {
         const player = this.continuousPlayer;
         if (!player || event !== this.currentEvent || player.currentEvent !== event) return;
-        if (player.seekInFlight || player.isTransitioning) return;
+        if (player.seekInFlight || player.isTransitioning) {
+            this.rulerRebuildDeferred = event;   // 这一批让给下一批；最后一批就记成欠账
+            return;
+        }
+        // R203 — 剪辑态这一刀和 `rebookAxis`(:9143) 同一份理由，而且是更要命的那半：
+        // `setTotalDuration` 在 `clipModeActive` 下会 `reseedClipRange()`，把入出点重写成
+        // 「当前 ±30 秒」。补量每 1.5 秒交一批，等于用户刚拉好的区间每批被抹一次。
+        // 这里先不改尺，记下来；退出剪辑时再补一次（`toggleClipMode`）。
+        const controls = this.videoControls;
+        if (controls && (controls.clipModeActive || controls.isDragging
+            || controls.isDraggingClipStart || controls.isDraggingClipEnd)) {
+            this.rulerRebuildDeferred = event;
+            return;
+        }
         event.totalDuration = 0;
         await player.calculateEventDurations(event, { skipProbe: true });
         if (event !== this.currentEvent || player.currentEvent !== event) return;
-        this.videoControls.setTotalDuration(player.getTotalDuration());
-        this.videoControls.addEventMarkers(event);
+        // R203 — 算完的尺要交到「用尺的人」手里。`calculateEventDurations` 每次新造
+        // `event.segmentDurations/StartTimes`（:8987），而播放引擎、进度、事件时钟读的是
+        // `loadEvent` 抄下的那两份引用（:9017）。只写回事件的话，控件条按新尺画、播放器还按
+        // 60 秒一格算：`getTotalDuration`、`applySeek`、时钟三者互相对不上（R200 的验收只量了
+        // `event.*`，所以这套数字当时全是绿的）。
+        player.segmentDurations = event.segmentDurations;
+        player.segmentStartTimes = event.segmentStartTimes;
+        player.totalDuration = event.totalDuration;
+        this.rulerRebuildDeferred = null;
+        controls.setTotalDuration(player.getTotalDuration());
+        controls.addEventMarkers(event);
+        // 曲线和时间轴上的缺口刻度同样画在这把尺上（同 `rebookAxis`:9167）。曲线不能走
+        // `refreshSpeedGraph()`：它拿的 `lastSpeedGraphData.durations` 是开事件那一刻的旧引用
+        // （一格 60 秒），而重建尺换掉了整份数组，重画只会照旧轴再排一遍。
+        if (controls.lastSpeedGraphData) {
+            controls.drawSpeedGraph(controls.lastSpeedGraphData.metadata, player.segmentDurations);
+        }
     }
 
     showCardContextMenu(event) {
@@ -23739,7 +23792,7 @@ class TeslaCamViewer {
         try {
             console.log('[loadTauriDirectory] Scanning path:', path);
             const files = isTouchShellRuntime()
-                ? await this.nativeScanFiles(path, { streamPreview: !keepList })
+                ? await this.nativeScanFiles(path, { streamPreview: !keepList, refresh: !!options.pullRefresh })
                 : await this.scanTauriFiles(path, path);
             // The walk is over; from here on the skeleton line belongs to the sidecar stage, and a
             // poll landing late would flip "读取事件信息 24/30" back to the file count.

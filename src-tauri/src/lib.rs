@@ -406,7 +406,7 @@ impl ScanIndex {
         }
     }
 
-    fn load(root: &str) -> Self {
+    fn load(root: &str, allow_sealed: bool) -> Self {
         let Some(dir) = SCAN_INDEX_DIR.get() else {
             return ScanIndex::empty();
         };
@@ -431,9 +431,11 @@ impl ScanIndex {
             .next()
             .and_then(|line| line.strip_prefix("V\t"))
             .and_then(|value| value.trim().parse::<u64>().ok());
-        index.sealed = !file.with_extension("dirty").exists()
+        index.sealed = allow_sealed
+            && !file.with_extension("dirty").exists()
             && header_dev.is_some()
-            && header_dev == dev;
+            && header_dev == dev
+            && written_within(&file, 10);
         for line in lines {
             let mut parts = line.split('\t');
             match parts.next() {
@@ -582,6 +584,21 @@ fn stamp_is_fresh(stamp: u64) -> bool {
     now.saturating_sub(stamp) < 2_500_000_000
 }
 
+/// R203 — 这份清单写下到现在过了 `minutes` 分钟以内吗。
+///
+/// R199 的「同一次挂载里别人不会改盘」只在刚扫过的几分钟里成立：车一直在往 `RecentClips` 写，
+/// 文件管理器、电脑（MTP）、`adb push` 都在往同一块盘写，而挂载设备号一个字都没变。实测：
+/// 把 `/sdcard/TeslaCamR204` 整个删掉重建成另一种结构，封存索引照样把 900 个早已不存在的路径
+/// 交回页面，列表看起来「没变化」。读不到时间（文件被换、时钟回拨）一律按「不新鲜」处理：
+/// 宁可多问一次目录 mtime。
+fn written_within(file: &std::path::Path, minutes: u64) -> bool {
+    file.metadata()
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|when| when.elapsed().ok())
+        .is_some_and(|age| age < std::time::Duration::from_secs(minutes * 60))
+}
+
 fn children_of(dir_text: &str, names: Vec<(String, bool)>) -> Vec<Child> {
     names
         .into_iter()
@@ -599,6 +616,8 @@ fn read_children(dir: &std::path::Path, index: &mut ScanIndex) -> Option<Vec<Chi
     let dir_text = dir.to_str()?.trim_end_matches('/');
     // R199 — 同一次挂载里写下的索引、之后我们自己也没删过东西：安卓上盘是独占挂载，不可能被
     // 别的设备改写，于是连目录 mtime 都不问（1.9 TB 盘上那是 2 496 次往返，实测 ~10 s）。
+    // R203 — 这个前提只在扫描之后的一小会儿里成立（`written_within`），而且用户主动下拉刷新时
+    // 干脆不问它：那一下就是「我知道盘上有了新东西，去看」。
     if index.sealed {
         if let Some(names) = index.listing(dir_text, None) {
             index.dirs_reused += 1;
@@ -842,14 +861,18 @@ fn scan_categories(
 }
 
 fn scan_tree(path: &str) -> Result<ScanReport, String> {
-    scan_tree_with(path, None)
+    scan_tree_with(path, None, true)
 }
 
 /// `stream` is the phone's progressive scan: the same walk, the same budgets, the same report, but
 /// every few hundred files are also emitted as a `scan-batch` event so the list can fill in.
+///
+/// `allow_sealed` is R203's 「这次可以偷懒吗」：只有页面自己刷（开机恢复、切 chip）才允许用封存索引
+/// 代替目录 mtime。用户下拉刷新、插盘广播那些「盘上确实变了」的现场必须去问。
 fn scan_tree_with(
     path: &str,
     stream: Option<(&tauri::AppHandle, u64)>,
+    allow_sealed: bool,
 ) -> Result<ScanReport, String> {
     let started = std::time::Instant::now();
     let root = std::path::Path::new(path);
@@ -862,7 +885,7 @@ fn scan_tree_with(
     // R191 — only the phone's streaming scan keeps a stat index; the desktop scan reads local
     // disks where a `stat` costs nothing and a stale size would just be a wrong number in a list.
     let indexing = stream.is_some();
-    let mut index = if indexing { ScanIndex::load(path) } else { ScanIndex::empty() };
+    let mut index = if indexing { ScanIndex::load(path, allow_sealed) } else { ScanIndex::empty() };
     let mut top: Vec<_> = top.flatten().collect();
     top.sort_by_key(|entry| category_rank(&entry.file_name().to_string_lossy()));
     // R168: the three TeslaCam folders are merged by their children's names; anything else keeps
@@ -975,8 +998,10 @@ async fn scan_media_dir_stream(
     app: tauri::AppHandle,
     path: String,
     scan_id: u64,
+    refresh: Option<bool>,
 ) -> Result<ScanReport, String> {
     let root = path.clone();
+    let allow_sealed = refresh != Some(true);
     LATEST_SCAN_ID.store(scan_id, Ordering::Relaxed);
     SCAN_FILES_SEEN.store(0, Ordering::Relaxed);
     SCAN_RUNNING.store(true, Ordering::Relaxed);
@@ -984,7 +1009,7 @@ async fn scan_media_dir_stream(
     // media server has to know this root before the first batch lands. Registering it after the
     // walk (what `scan_media_dir` does) made every preview image a 403.
     stream_server::set_allowed_roots(vec![root.clone()]);
-    let result = blocking(move || scan_tree_with(&path, Some((&app, scan_id)))).await;
+    let result = blocking(move || scan_tree_with(&path, Some((&app, scan_id)), allow_sealed)).await;
     SCAN_RUNNING.store(false, Ordering::Relaxed);
     let report = result?;
     if LATEST_SCAN_ID.load(Ordering::Relaxed) == scan_id {

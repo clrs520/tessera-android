@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Tessera",
-  "version": "1.2.328",
+  "version": "1.2.329",
   "identifier": "com.tdashcam.studio",
   "build": {
     "frontendDist": "../src",

@@ -15998,3 +15998,81 @@ sha256 `9d6233b836de835124d423436a30033e150f328290799733414a34be71a3c8d5`。
 第 4 批原生生命周期（`startForeground` 未兜底、导出无墙钟看门狗、同步桥仍做 FUSE、`.part` 改名）。
 第 5 批 UI（四处禁用态 `opacity`、目录浏览器不吃 `--kb-h`、32/40 px、`inert` 名单、玻璃采样白跑）。
 未核实与已判「不采信」的清单在 `project-tdashcam-r203-audit` 记忆里。
+
+# R204 —— 第 2 批：后台补量的尺交到谁手里，以及封存索引凭什么一直算「没变化」
+
+用户回「请继续」⇒ 按 R203 的批次往下推。这一批把 R200 那套「先出画面、后台补尺」的账还清，
+外加一条做夹具时**亲眼撞出来**的新缺陷（不在原 17 条里）。
+
+## 1. 先红：1.2.328 上的读数
+
+`devtools/r204-verify.js`（判据自己代答 `probe_durations = 42 s`，故意让补量的第一批失败一次）：
+
+```
+前置：播放器确实停在这个事件上              ← 绿
+A5 拒绝之后还要问下一批 = 120              ← 红（只问出去一批）
+A5 桥偶尔拒绝不该终止整轮 = 1/150           ← 红（只量到入口那一段）
+A1 播放器实例看到的是改过的那一段 = 60        ← 红（该是 42）
+A2 剪辑态下重建尺不冲掉入出点 = 0/30         ← 红（100/160 被 reseed 成「当前 ±30」）
+A2 挡下的那次重建记成欠账 = undefined        ← 红
+```
+
+`devtools/r204-scan-cache.sh` 三条全红：`sealed=true / 20 段旧事件 / loaded=false`，
+下拉刷新和普通扫描交出**一模一样**的答案。
+
+**判据本身也返工过一次**：A1 原来那三条在 1.2.328 上是绿的 —— 因为补量整个停在第一批，
+`event` 和 `player` 都还是同一份 60 s 旧尺，一比就「相等」。这正是 R200 假绿的同一个形状。
+改成判据亲手把某一段改成 42 s、再叫产品自己重建一次尺，然后问播放器实例看不看得到 —— 才红得下来。
+
+## 2. 改了什么
+
+| # | 位置 | 根因 → 修法 | 证据 |
+|---|---|---|---|
+| A1 | `rebuildRulerInPlace` | `calculateEventDurations` 每次**新造** `event.segmentDurations/StartTimes`（:8987），播放器的尺是 `loadEvent` 按引用抄的（:9017）⇒ 真时长永远进不到指针 / 进度 / 时钟。改：算完把三份（含 `totalDuration`）重新交给 player 实例 | 1.2.329 上 `player=event=6 300 s`（改前 8 982 s 的 60 s 猜值） |
+| A2 | 同上 + `toggleClipMode` | 剪辑态下 `setTotalDuration` 无条件 `reseedClipRange()` ⇒ 刚拉的入出点每 1.5 s 一批被抹平。改：照 `rebookAxis`(:9143) 抄同一份挡箭牌（剪辑 / 拖轴 / 拖入出点），并把这次重建**记成欠账**，退出剪辑补一次；整轮跑完若还欠着，2.5 s 后再补一次（只补一次） | 100/160 保持不动 |
+| A3 | `rebuildRulerInPlace` + `publishSpeedGraph` | 曲线不能走 `refreshSpeedGraph()`：它的 `lastSpeedGraphData.durations` 是开事件那一刻的旧数组。改：重建尺时按 `player.segmentDurations` 重画；`publishSpeedGraph` 落图时现取当前这把尺 | 代码可证 + 装机重画不报错（AVD 无遥测，落点差量不到） |
+| A5 | `sweepRulerDurations` | `catch { return }` 整轮中止，且那一批已被 `splice` 摘走捡不回来。改：退回队首再问，连续两批没答才收手（老引擎没这条命令，不许空转）；非数组答复同批处理 | 判据序列 `1,120,120,29` ⇒ 150/150 段量到 |
+| C1 | `lib.rs` `ScanIndex::load` / `read_children` | **新发现的**：R199 的「封存索引」假定同一次挂载里别人不会改盘，实测不成立 —— 车、文件管理器、MTP、`adb push` 都在同一 `st_dev` 上写。整棵换掉 `/sdcard/TeslaCamR204` 之后，扫描照旧交出 900 个已不存在的路径（`sealed=1 dirsCached=151/151`），**下拉刷新也一样**。改两半：① 封存只在索引写下 10 分钟内成立（`written_within`）；② 页面把 `pullRefresh` 变成 `refresh:true` 传下来（`nativeScanFiles` → `scan_media_dir_stream`），这一路彻底不用封存 | 见 §1 的三条红 → 5/0 绿 |
+
+桌面一字未动：`scan_tree` 走 `allow_sealed=true` 且 `indexing=false`（本来就不建索引）；
+`refresh` 只在手机那条流式命令上出现；`publishSpeedGraph` 在桌面拿到的本来就是同一份数组。
+
+## 3. 这一批撞出来的工具坑（都要记着）
+
+- **事件按「文件所在目录」归并**（`script.js:15990`）：一分钟一个目录 = 150 个单段事件，
+  补量根本不跑。大事件夹具必须是**同一个目录里的平铺文件**。
+- **/sdcard 这类 FUSE 卷的目录 mtime 确实随增删更新**（实测 `RecentClips` 里 touch 一个文件
+  ⇒ :319→:402，删掉 ⇒ :405）。所以「问 mtime」这条老路在内置存储也可信，R195 在 FAT32/exFAT
+  上的结论不必推翻；错的只是 R199 那条「连 mtime 都不问」。
+- **冷启动自己会扫一次**：探针抢在它前面调用 `loadTauriDirectory`，会被 `scanToken` 挡回 `false`，
+  于是读到的是上一轮留下的列表。判据要先 `while (v.isScanning) await sleep(300)`，
+  并把 `loaded` 一起断言 —— 否则「刷新换了列表」和「刷新答了没有变化」分不开。
+- **`/sdcard/TeslaCamR156` 这类历史夹具目录会被别的判据复用**：换结构时顶层目录名别动，
+  否则根 `read_dir` 一定看得见，测不出缓存。
+- **这台 AVD 只有 2.4 GB**：重启后 boot storm（load 17~32）会把 APP 直接 OOM 掉，
+  表现是「timed out waiting for the WebView to answer」和 `ps` 里查无此人 —— 不是包坏。
+  本轮为此重启过一次模拟器，`r182-note` 之后没能再跑（见 §4 的诚实清单）。
+
+## 4. 装机验收（1.2.329）
+
+改前红（§1）⇒ 改后：`r204-verify` **9/0**、`r204-scan-cache` **5/0**、
+`r203-verify` **12/0**、`r201-dragselect` **11/0**、`r102-verify` 竖屏 **93/0**、
+`r102-verify-landscape` **36/0**、`r173-verify` **40/0**、`r186-batch-delete` **17/0**、
+`r185-scroll-chip` **5/0**、`r182-note` **24/0** —— 合计 242 条断言 0 红。
+（`r173-verify` 与 `r182-note` 各被模拟器的内存压力打断过一轮：一次 WebView 不 attach、
+一次进程被 OOM；重启模拟器 + 先 `loadTauriDirectory` 到各自夹具之后才跑干净。）
+
+`Tessera-1.2.329.apk` 28,540,167 B，md5 `b0b9d4434c12e8e7a5d279866ec16d55`，
+sha256 `0bf0493b650e0f761e300b27d2f9c237b608480aac111a5320e63285519c33ce`。
+
+新夹具 `/sdcard/TeslaCamR204/RecentClips`（150 分钟 × 0 字节 `front.mp4`，建法写在判据文件头）。
+
+## 5. 剩下的账
+
+第 3 批扫描与删除的失败路径（catch 里 await 后不复查 token、`scanPoll` 泄漏、
+`lib.rs:986/989` 白名单失败不回滚、`read_sidecars` 无字节上限）。
+第 4 批原生生命周期（`startForeground` 未兜底、导出无墙钟看门狗、同步桥仍做 FUSE、`.part` 改名、
+`ExportEngine.kt:719` 用 `currentTimeMillis` 节流）。
+第 5 批 UI（四处禁用态 `opacity`、目录浏览器不吃 `--kb-h`、32/40 px、`inert` 名单、玻璃采样白跑）。
+封存索引还留一条已知边界：**开机恢复那一扫仍可能答 10 分钟内的旧清单**（故意的取舍 —— 2 TB 盘上
+「问 mtime」实测多花 ~10 s）；真机若还有人报「早上打开看不到昨天的片子」，就把这条也改成刷新级。
