@@ -7206,6 +7206,7 @@ class VideoListComponent {
                 this.viewer.toggleEventSelection(event.eventId);
             };
             card.classList.add(this.viewer.eventOwnFolder(event) ? 'selectable' : 'locked');
+            card.setAttribute('role', 'option');
             card.setAttribute('aria-selected', String(this.viewer.selection.has(event.eventId)));
             if (this.viewer.selection.has(event.eventId)) card.classList.add('picked');
             return card;
@@ -21165,6 +21166,7 @@ class TeslaCamViewer {
             for (const card of list.querySelectorAll('.video-card')) {
                 const on = this.selection.has(card.dataset.eventId);
                 card.classList.toggle('picked', on);
+                card.setAttribute('role', 'option');
                 card.setAttribute('aria-selected', String(on));
             }
             this.updateSelectionUI();
@@ -21281,6 +21283,14 @@ class TeslaCamViewer {
         if (this.selectionMode === want) return;
         if (!want) this.cancelDragSelect();
         this.selectionMode = want;
+        // R207：卡片带 `aria-selected` 就必须活在一个能接受这个属性的 role 里，
+        // 否则读屏软件读到的是「一个 role=group 说自己是 selected」，等于没有信息。
+        // 选择态进出各跑一次，容器只有这一个，所以不会漏。
+        for (const list of document.querySelectorAll('.video-list')) {
+            if (want) list.setAttribute('role', 'listbox'); else list.removeAttribute('role');
+            if (want) list.setAttribute('aria-multiselectable', 'true');
+            else list.removeAttribute('aria-multiselectable');
+        }
         if (!want) this.selection.clear();
         this.dom.sidebar?.classList.toggle('select-mode', want);
         const t = i18n[this.currentLanguage];
@@ -21306,6 +21316,7 @@ class TeslaCamViewer {
         for (const card of (this.dom.fileList?.querySelectorAll('.video-card') || [])) {
             const on = this.selection.has(card.dataset.eventId);
             card.classList.toggle('picked', on);
+            card.setAttribute('role', 'option');
             card.setAttribute('aria-selected', String(on));
         }
         if (!selectable.length) this.showToast(t.deleteSharedDir, 'error', 4000);
@@ -21934,6 +21945,13 @@ class TeslaCamViewer {
         if (main) main.inert = !!top;
         const bar = document.getElementById('phoneActionBar');
         if (bar) bar.inert = !!top;
+        // R207：`#metaDetailOverlay`（行车数据整面）和 `#exportPill`（导出中的胶囊）挂在 body 上，
+        // 不在 `.main-content` 里 —— 前面那一遍盖不到它们，弹层开着时焦点还能走进去，
+        // 而胶囊点上去是「回导出页」，正是要挡的那类越层操作。
+        for (const id of ['metaDetailOverlay', 'exportPill']) {
+            const el = document.getElementById(id);
+            if (el) el.inert = !!top;
+        }
         if (!top) {
             // Hand focus back to wherever the sheet was opened from, but only if that control is still
             // on the page — a sheet opened from a list row that has since been re-rendered must not

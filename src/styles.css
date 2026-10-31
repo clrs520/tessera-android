@@ -38,6 +38,13 @@
 
     --text-primary: #1c1e21;
     --text-secondary: #6c757d;
+    /* R207：禁用态原来一律用 `opacity: .4~.45` 把整行压淡 —— 那样「画出来的墨」是颜色与底色的混
+       合物，任何拿 `color` 算的账都算不到它（R70 已经为这一类吃过一次假绿）。实测到底：浅色菜单
+       2.47:1、导出主按钮 2.22:1、批量删除 1.85:1 —— 都低到读不清。改成显式的禁用墨，
+       下面四个禁用态一律 `opacity: 1 + var(--ink-disabled)`；填充式按钮换中性填充底，
+       不再让白字压在主题色上算不出可读性。值按实测底（白 / #efefef / #1a1d28 / 近黑）各自 ≥3.1:1。 */
+    --ink-disabled: #6e737c;
+    --fill-disabled: #e6e7ec;
     --text-on-button: #ffffff;
     --text-on-dark: #ffffff;
     --text-header: #1c1e21;
@@ -99,6 +106,9 @@ body.dark-theme {
 
     --text-primary: #e4e6eb;
     --text-secondary: #b0b3b8;
+    /* R207：深色主题下 `opacity: .4` 更糟——墨本来就浅，再压四成直接贴到底上。见 `:root` 那段注释。 */
+    --ink-disabled: #949aa6;
+    --fill-disabled: #353a46;
     --text-on-button: #ffffff;
     --text-on-dark: #ffffff;
     --text-header: #e4e6eb;
@@ -4806,8 +4816,7 @@ body:not(.dark-theme) #cancelClipBtn:hover {
     .dir-browser-list {
         flex: 1 1 auto;
         min-height: 0;
-        max-height: none;
-    }
+        }
 
     /* 528px of content width fits the field and both action buttons on one row; the
        shared phone rule's `flex: 1 1 100%` wraps them and costs a whole line. */
@@ -5388,7 +5397,9 @@ body:not(.dark-theme) #cancelClipBtn:hover {
     }
 
     .context-item[disabled] {
-        opacity: 0.4;
+        /* R207：见 :root 的 --ink-disabled。整行（含跟着 currentColor 走的图标）一起换墨，不再用 opacity。 */
+        opacity: 1;
+        color: var(--ink-disabled);
     }
 
     /* A row this build cannot honour has no business showing up greyed out. */
@@ -7796,7 +7807,11 @@ html.touch-ui .filter-type-group .choice-segment {
        on this very button. The fill family is `--accent-solid`, same as the selected segment next
        to it. */
     .pe-nav-go { background: var(--accent-solid); color: #fff; }
-    .pe-nav-go[disabled] { opacity: 0.42; }
+    .pe-nav-go[disabled] {
+    opacity: 1;
+    background: var(--fill-disabled);
+    color: var(--ink-disabled);
+}
 
     /* One action in the right slot at a time: 开始导出 until a job exists, 取消 while it runs.
        Both are in the DOM so the existing handlers never have to be re-wired. */
@@ -9057,6 +9072,11 @@ html.touch-ui .filter-type-group .choice-segment {
     }
 
     .phone-gesture-hint button {
+        /* R207：原来是 30×30，低于 40dp 的触摸下限（同一批还漏了别的）。图标大小不变，
+           靠透明内缩把命中区抬到 40 —— 视觉上还是一个叉，手指能点着了。 */
+        min-width: 40px;
+        min-height: 40px;
+        background-clip: content-box;
         flex: 0 0 auto;
         width: 30px;
         height: 30px;
@@ -10242,6 +10262,14 @@ html.sheet-mode #filePathModal.modal-overlay {
         calc(10px + var(--safe-bottom)) calc(10px + var(--safe-left));
 }
 
+/* R207：目录浏览器原来完全不参与 `--kb-h` —— 键盘弹起来时底部那几行被盖住，而同一批
+   iOS 抽屉（筛选面等）都会按键盘高度上抬。这里补同一条通道：`--kb-h` 取原生与
+   visualViewport 两条里更深的那个（styles.css:15），底部留白按它长。 */
+html.touch-ui #androidDirModal .modal-content {
+    max-height: none;
+    margin-bottom: calc(12px + var(--kb-h, 0px));
+}
+
 html.sheet-mode #androidDirModal .modal-content,
 html.sheet-mode #aboutModal .modal-content,
 html.sheet-mode #filePathModal .modal-content {
@@ -11050,7 +11078,8 @@ html.touch-ui .filter-note:not([hidden]) {
     }
 
     html.touch-ui .filter-sheet-action[disabled] {
-        opacity: 0.4;
+        opacity: 1;
+        color: var(--ink-disabled);
         pointer-events: none;
     }
 
@@ -11686,7 +11715,11 @@ html.touch-ui body:not(.dark-theme):has(.player-area.empty) .phone-brightness-di
     }
 
     html.touch-ui .sidebar.select-mode .batch-delete-btn:not([hidden]) { display: block; }
-    html.touch-ui .sidebar .batch-delete-btn:disabled { opacity: .45; }
+    html.touch-ui .sidebar .batch-delete-btn:disabled {
+    opacity: 1;
+    background: var(--fill-disabled);
+    color: var(--ink-disabled);
+}
 
     html.touch-ui .sidebar.select-mode .video-card {
         position: relative;
