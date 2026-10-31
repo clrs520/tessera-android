@@ -15865,3 +15865,65 @@ sha256 `7297e95fb1f97a4f852c4e69967bfcd69ee91765ee8269a52b1fe51055bcca18`。
 
 `Tessera-1.2.327.apk` 28,536,415 B，md5 `351b6da22a582c6cad0099e24c34927c`，
 sha256 `5aa39a3afd584bc0eb3cf1039561711a58fbf6dae979eb06472496f5395916f8`。
+
+# R202 —— GitHub 项目页从「改了什么」补成「这是什么」
+
+本轮**不改产品代码**，只补仓库对外信息：`README.md` / `README_CN.md` 重写 + `doc/screens/` 七张真机（模拟器）截图 +
+仓库 About 描述与 topics + 最新 Release 正文。版本号仍是 **1.2.327**，交付物与 R201 完全一致：
+`Tessera-1.2.327.apk` 28,536,415 B，sha256 `5aa39a3afd584bc0eb3cf1039561711a58fbf6dae979eb06472496f5395916f8`
+（GitHub 资产 `digest` 字段实测同值），故本轮**不重新构建**。
+
+## 1. 为什么原来的页面不够用
+
+旧 README 只有「上游署名 / 本分支改了什么 / 构建 / 目录」四段——那是写给**要看源码的人**的，
+不是写给**考虑装不装的人**的。缺的正是决定装不装的那几件事：装到哪、要什么权限、能干什么、
+出问题了往哪问。所以新版按「先给结论，再给证据」的顺序补齐：
+
+| 新增段 | 补的是哪个问题 |
+|---|---|
+| 下载与安装（4 步 + 覆盖升级 + SHA-256） | 我上哪儿拿包、怎么升、怎么验 |
+| 界面一览（7 张截图） | 长什么样 |
+| 它能做什么（播放 / 数据 / 列表 / 导出 / U 盘 / 手机本身） | 值不值得装 |
+| 5 分钟上手、手势一览 | 装完会不会用 |
+| 手机与桌面的差异 | 上游用户最关心的「我熟的那个还一样吗」 |
+| 权限与隐私（逐条权限给理由） | 「所有文件访问」这种敏感权限为什么要给 |
+| 遇到问题 | 报障路径与要带的信息 |
+
+打赏码继续留在最上方（R201 之后那次「没看到打赏码」的要求）。
+
+## 2. 截图是量出来的，不是猜的
+
+七张全部来自 `emulator-5554` 上的 `adb exec-out screencap -p`，CDP 只做状态设置：
+
+| 文件 | 打开方式 | 画面里必须看到的判据 |
+|---|---|---|
+| `list.png` | `viewer.toggleSidebar(true)` | 7 张真帧缩略图已上屏、日期 chip「10-09」、来源「保存片段 · 1.3MB」 |
+| `grid6.png` | `viewer.playEvent(id)` | 前视带触发描边 + 「手动」角标、左侧/右侧「无信号」、左柱右柱有帧 |
+| `single.png` | `.view-btn[data-view="front"].click()` | 布局三档 + F/B/L/R/LP/RP 直选、进度条、倍速 1x |
+| `select.png` | R201 拖选判据跑到中途冻结取证 | 「已选 4 个」+ 四枚勾选 + 「删除 4」 |
+| `export.png` | 置 `clipModeActive` 后 `showPhoneExportModal()` | 「1 路 · 1600x720 · 00:02 · 约 759KB · 剩 7.4GB」 |
+| `settings.png` | 底栏「设置」真点击（868,2233） | 播放起点/换段缝/最近片段三行直选 + 主题三态 |
+| `about.png` | `viewer.openAbout()` | v1.2.327、上游链接、U 盘指南、Issues、打赏码 |
+
+每张都回读截图核对过文字，不看 DOM 状态就算数（`feedback-verify-appearance-not-just-state`）。
+
+## 3. 本轮踩到的模拟器坑（记进假信号清单）
+
+- **第三方相册会抢前台并把我们的进程打成 `cch CRE`**：`com.liangqing.photos` / `com.zalbum` 在
+  `pm disable-user` 之后仍然回到前台一次，导致两张截图拍到的是系统相册的「显示设置」页。
+  改成 `pm disable`（不带 `--user 0`）+ 每次截图前 `dumpsys activity activities | grep topResumedActivity` 确认，
+  才拿到干净的七张。R193 那条「跑前先确认前台」的判据同样适用于**截图**。
+- **`settings put system user_rotation 3` 在 WebView 上没落**（横屏那张最终放弃），
+  与 R143 记录的「只认 `innerWidth`」一致：量不到就不塞进文档。
+- **导出页的合成预览在 AVD 上是全黑帧**（解码器不交纹理），所以 `export.png` 只用于展示上半部的选项栅格，
+  README 里也没拿它当「导出效果」的证据。
+- 素材是 `screenrecord` 出来的模拟器画面，所以缩略图与视频格子里是「APP 自己的列表」。
+  因此 README 的截图段落第一句就写明**模拟器演示素材（非真实路况录像）**，避免被读成宣传图。
+
+## 4. 仓库元信息
+
+- About 描述改成一句能读懂的话：`特写 / Tessera — 在安卓上直接看 Tesla 六路行车记录仪：OTG 读 U 盘、六路同步播放、SEI 行车数据、剪辑与原生导出。Tauri 2 + Rust + Kotlin，桌面版 TDashcam Studio 的安卓分支（AGPL-3.0）。`
+- topics 从 8 个补到 20 个（加 `mediacodec`、`telemetry`、`sei`、`autopilot`、`usb-otg`、`external-storage`、`sentry-mode`、`agpl-3` 等）。
+- v1.2.327 的 Release 正文加了包名/体积/SHA-256 与「覆盖安装即升级」，再往下才是原来的 R201 技术说明。
+- 渲染核对：`gh api -H "Accept: application/vnd.github.html" repos/.../readme` 里七张图的 `<img ... width="230">` 都保留，
+  表格 + HTML 混排在 GitHub 上不塌。
