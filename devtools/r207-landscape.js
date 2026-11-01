@@ -33,13 +33,14 @@
         return [255, 255, 255];
     };
 
-    // 展开筛选整面：横屏下 `.filter-stack` 是一个从抽屉右缘折出来的面，收起时宽度 0（R171）。
+    // 展开筛选整面：横屏下 `.filter-stack` 是一个从抽屉右缘折出来的面，收起时宽度 0（R171），
+    // 而抽屉在手机档**默认收起**（`.sidebar.collapsed .filter-stack{display:none}`）。
+    // 「直接把 collapsed 摘掉」实测拿不到这一面（1.2.332 上 0×0）—— 抽屉开合有自己的状态机，
+    // 所以走产品自己的门：`toggleSidebar(true)` 展开抽屉，再 `setFiltersOpen(true,false)` 折出这一面。
     v.syncSidebarAria && v.syncSidebarAria();
-    // 展开这件事走产品自己的门：`setFiltersOpen`（横屏读 `.sidebar.filters-open`，CSS 也是 landscape-only）。
+    if (typeof v.toggleSidebar === 'function') v.toggleSidebar(true);
+    await sleep(500);
     if (typeof v.setFiltersOpen === 'function') v.setFiltersOpen(true, false);
-    else if (v.dom && v.dom.sidebar) v.dom.sidebar.classList.add('filters-open');
-    if (v.dom && v.dom.sidebar && !v.dom.sidebar.classList.contains('filters-open'))
-        v.dom.sidebar.classList.add('filters-open');
     await sleep(700);
     const btn = document.getElementById('filterResetBtn');
     const vis = (el) => !!el && el.checkVisibility({ visibilityProperty: true, displayProperty: true })
@@ -47,18 +48,30 @@
     ok('前置：横屏筛选面开着（重置钮可见可量）', vis(btn), btn ? `${Math.round(btn.getBoundingClientRect().width)}×${Math.round(btn.getBoundingClientRect().height)}` : '元素不存在');
     if (!vis(btn)) return JSON.stringify(out);
     const was = btn.disabled;
+    // `cs(btn.color)` 是**旧判据自己的 bug**：`btn.color` 是 <button> 上没有的属性（undefined），
+    // 传进 getComputedStyle 直接抛「parameter 1 is not of type 'Element'」，整份横屏判据变成一条 threw。
+    // 计算值要从元素上取：`cs(btn).color`。
+    const ink = () => {
+        const bg = bgOf(btn), c = rgb(cs(btn).color), o = Number(cs(btn).opacity);
+        const eff = [o * c[0] + (1 - o) * bg[0], o * c[1] + (1 - o) * bg[1], o * c[2] + (1 - o) * bg[2]];
+        return { bg, c, o, eff };
+    };
     for (const dark of [false, true]) {
         localStorage.setItem('tdashcam.themeMode', dark ? 'dark' : 'light');
         v.applyTheme(v.resolveThemeDark(dark ? 'dark' : 'light'));
         await sleep(500);
         if (document.body.classList.contains('dark-theme') !== dark) ok(`前置：主题切到${dark ? '深色' : '浅色'}`, false);
+        btn.disabled = false; await sleep(120);
+        const live = ink();
         btn.disabled = true; await sleep(150);
-        const bg = bgOf(btn), c = rgb(cs(btn.color)), o = Number(cs(btn.opacity));
-        const eff = [o * c[0] + (1 - o) * bg[0], o * c[1] + (1 - o) * bg[1], o * c[2] + (1 - o) * bg[2]];
-        ok(`禁用态「重置」在${dark ? '深色' : '浅色'}横屏筛选面上读得清（≥3:1）`,
-            ratio(eff, bg) >= 3 && ratio(c, bg) >= 3,
-            `${ratio(eff, bg).toFixed(2)}:1（墨 ${cs(btn.color)}、opacity=${cs(btn.opacity)}、底 rgb(${bg})；启用态 ${ratio(c, bg).toFixed(2)}:1）`);
+        const d = ink();
         btn.disabled = was;
+        ok(`前置：横屏「重置」的禁用规则确实挂上了（${dark ? '深' : '浅'}色：禁用墨 ≠ 启用墨）`,
+            String(d.c) !== String(live.c) || d.o !== live.o,
+            `禁用 rgb(${d.c.slice(0, 3)}) opacity=${d.o} / 启用 rgb(${live.c.slice(0, 3)}) opacity=${live.o}`);
+        ok(`禁用态「重置」在${dark ? '深色' : '浅色'}横屏筛选面上读得清（≥3:1）`,
+            ratio(d.eff, d.bg) >= 3,
+            `${ratio(d.eff, d.bg).toFixed(2)}:1（墨 ${cs(btn).color}、opacity=${d.o}、底 rgb(${d.bg.map(Math.round)})；启用态对同底 ${ratio(live.eff, live.bg).toFixed(2)}:1）`);
     }
     localStorage.setItem('tdashcam.themeMode', 'light');
     v.applyTheme(v.resolveThemeDark('light'));

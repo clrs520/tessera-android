@@ -42,7 +42,8 @@
             return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
         };
         const l1 = lum(eff), l2 = lum(backdrop);
-        return { ratio: (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05), opacity: Number(cs(el).opacity) };
+        return { ratio: (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05), opacity: Number(cs(el).opacity),
+            color: cs(el).color, bg: `rgb(${Math.round(backdrop.r)},${Math.round(backdrop.g)},${Math.round(backdrop.b)})` };
     };
     const rectOf = (el) => { const r = el.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height) }; };
     const shown = (el) => !!el && el.checkVisibility({ visibilityProperty: true, displayProperty: true })
@@ -61,6 +62,11 @@
 
     // ---- 1) 四个禁用态：面必须真开着 --------------------------------------------------------------
     const faces = {};
+    // 整套判据都建在「已经扫出事件」上：冷启动的扫描是后台的，列表还没出来时长按菜单开不起来、
+    // 导出计划也不成立。等它，最多 45 秒，等不到就红在前置上。
+    for (let i = 0; i < 180 && !(v.eventGroups || []).length; i++) await sleep(250);
+    ok('前置：本机扫到了事件（长按菜单与导出计划都要有事件才摆得出面）', (v.eventGroups || []).length > 0,
+        `${(v.eventGroups || []).length} 组`);
     await v.showCardContextMenu?.call(v, (v.eventGroups || [])[0]);
     await sleep(320);
     faces.menu = document.querySelector('.card-context-menu');
@@ -77,27 +83,27 @@
     faces.batch = selBtn();
     faces.batchShown = shown(faces.batch);
 
-    // 筛选面的两颗动作钮在抽屉头部（index.html:139-140）：抽屉收起时它们是 0×0，
-    // 「面开着」这条前置必须由抽屉真的展开来满足，不能拿隐藏的节点量。
-    document.body.classList.remove('sidebar-collapsed');
-    if (v.syncSidebarAria) v.syncSidebarAria();
-    await sleep(600);
-    const sheetAction = document.getElementById('filterResetBtn');
-    faces.sheetAction = sheetAction;
-    faces.sheetShown = shown(sheetAction);
-
+    // 筛选面那两颗动作钮**不在竖屏这一边**：整条规则（`.filter-sheet-action` 与它的 `[disabled]`）
+    // 在横屏那条 @media 里（styles.css:10966），而竖屏下 `.filter-stack` 是 `display: contents`、
+    // `#filterResetBtn` 实测 0×0 / checkVisibility=false（1.2.332 上量的）。
+    // 留在这一份里只会得到一条「前置：这一面没开着」的红 —— 那一面本来就不该在竖屏画出来，
+    // 归横屏半边（r207-landscape.js）量。
     for (const [name, el, isVisible, need] of [
         ['长按菜单项（.context-item[disabled]）', faces.menu && faces.menu.querySelector('.context-item'), faces.menuShown, 'disabled'],
         ['导出页主按钮（.pe-nav-go[disabled]）', faces.peGo, faces.peShown, 'disabled'],
-        ['筛选面动作（.filter-sheet-action[disabled]）', faces.sheetAction, faces.sheetShown, 'disabled'],
         ['批量删除（.batch-delete-btn:disabled）', faces.batch, faces.batchShown, 'disabled'],
     ]) {
         if (!isVisible || !el) { ok(`前置：${name} 这一面开着`, false, `${name} 没开着/没找到`); continue; }
         const before = el.disabled;
         el.disabled = true; await sleep(120);
         const o = inkOf(el);
-        el.disabled = before; await sleep(120);
+        // 「启用态」要**真的把它启用**再读，不是「复原成来时的样子」：这两颗钮在产品里本来就禁着
+        // （没选东西 / 导出计划不成立），复原后读到的还是禁用墨 ⇒ 「禁用 ≠ 启用」红在判据自己头上
+        // （1.2.332 上实测：禁用 rgb(110,115,124) / 启用 rgb(110,115,124)）。
+        el.disabled = false; await sleep(120);
+        if (el.disabled) { ok(`前置：${name} 能被启用（启用态对照拿得到）`, false, '设 disabled=false 后仍是禁用：状态机把它按回去了'); continue; }
         const live = inkOf(el);
+        el.disabled = before;
         // 规则有没有真的挂上，看的是**计算色变了没有**（旧写法钉 opacity<1，那是旧修法的形状；
         // 换成显式禁用墨之后 opacity 就该是 1，再钉它会得到一条永远红的「前置」）。
         ok(`前置：${name} 的禁用规则确实挂上了（禁用色 ≠ 启用色）`,
@@ -143,33 +149,64 @@
     // 只往节点上挂 `.show` 类量到的是 0×0，那不是控件的尺寸，是夹具没把状态摆出来。
     // 所以这里真起一单（单路 3 s 素材，十几秒就完），量完取消。
     await v.showPhoneExportModal(); await sleep(500);
+    // 起单要有 `currentEvent`（`phoneExportPlan` 第一行就是 `if (!event || !event.segments) return {error:'无元数据'}`，
+    // script.js:26377）。冷启动后没播过任何事件 ⇒ 计划永远不成立 ⇒ 胶囊只能退到「量样式盒」。
+    // 判据自己把前置摆出来：`playEvent(eventId)` 可能挂着不 resolve（R200 记过），所以发出去不 await，改轮询状态。
+    if (!(v.currentEvent && v.currentEvent.segments) && (v.eventGroups || []).length) {
+        const target = (v.eventGroups.find((g) => (g.segments || []).length) || v.eventGroups[0]);
+        out.notes.pillFixture = target.eventId + '（' + (target.segments || []).length + ' 段）';
+        Promise.resolve(v.playEvent(target.eventId)).catch(() => { });
+        for (let i = 0; i < 60 && !(v.currentEvent && v.currentEvent.segments); i++) await sleep(250);
+        out.notes.pillEvent = !!(v.currentEvent && v.currentEvent.segments);
+    }
     v.videoControls.clipStartTime = 0;
     v.videoControls.clipEndTime = v.videoControls.totalDuration || 3;
     v.peSelection.cameras = v.phoneExportCameras().slice(0, 1);
     v.peSelection.overlay = Object.assign({}, v.peSelection.overlay, { chrome: false, labels: false, watermark: false, mosaic: false });
     v.renderPhoneExportPanel(); await sleep(300);
-    if (!v.phoneExportPlan().error) {
+    out.notes.planError = v.phoneExportPlan().error || null;   // 起不了单要说得出为什么，否则「量不到」会被读成「没问题」
+    if (!out.notes.planError) {
         await v.startPhoneExport();
         for (let i = 0; i < 80 && !v.peJob; i++) await sleep(150);
     }
     out.notes.pillJob = !!v.peJob;
     const bodyWasCollapsed = document.body.classList.contains('sidebar-collapsed');
+    const measure = (list) => {
+        for (const [name, el] of list) {
+            if (!el) { out.notes[name] = '元素不存在（这一面本轮没走到）'; continue; }
+            if (!shown(el)) {
+                // 面没摆出来时退一步量样式表算出来的盒 —— **这不是 appearance**，
+                // 所以判据名字里写明是哪条路，别让两种强度混在一条绿里。
+                const st = cs(el);
+                const h = parseFloat(st.height) || parseFloat(st.minHeight) || 0;
+                ok(`${name} ≥40（面没开起来，退量样式盒）`, h >= 40,
+                    `样式高 ${h}px｜job=${out.notes.pillJob ? 'y' : 'n'}｜plan=${out.notes.planError || 'ok'}`);
+                continue;
+            }
+            const r = rectOf(el);
+            ok(`${name} ≥40×40`, r.w >= 40 && r.h >= 40, `${r.w}×${r.h}`);
+        }
+    };
+    // 页面还开着：先量页面里的两颗（返回键、画格搬运柄）。
     document.body.classList.add('sidebar-collapsed');
     await sleep(400);
-    const targets = [
+    measure([
         ['导出页返回（#peCloseBtn）', document.querySelector('#phoneExportModal #peCloseBtn')],
-        ['导出进行中胶囊 #exportPill', pill],
-        ['手势提示关闭', document.querySelector('#phoneGestureHint button')],
         ['画格搬运柄 .pe-tile-grip', document.querySelector('.pe-tile-grip')],
-    ];
+    ]);
+    // 再收起页面量胶囊：那一页开着时胶囊被压在下面，`checkVisibility` 实测为 false（1.2.331 上
+    // `job=y` 也量不到），于是这条永远只能退到样式盒。「导出在跑」时用户点的是真那颗胶囊。
+    v.hidePhoneExportModal && v.hidePhoneExportModal();
+    // 判据借来的前置要自己收尾：第 1 节开过长按菜单，而 `body.context-open` 会把胶囊整条 `display:none`
+    // （styles.css:6698）—— 于是「有作业在跑」的胶囊量不到，只能退到样式盒（R182 同一类坑）。
+    v.hideCardContextMenu && v.hideCardContextMenu();
+    await sleep(600);
     const hint = document.querySelector('#phoneGestureHint');
     if (hint && !shown(hint)) { hint.classList.add('show'); await sleep(300); }
-    for (const [name, el] of targets) {
-        if (!el) { out.notes[name] = '元素不存在（这一面本轮没走到）'; continue; }
-        if (!shown(el)) { ok(`前置：${name} 看得见`, false, '面积 0 或不可见'); continue; }
-        const r = rectOf(el);
-        ok(`${name} ≥40×40`, r.w >= 40 && r.h >= 40, `${r.w}×${r.h}`);
-    }
+    measure([
+        ['导出进行中胶囊 #exportPill', pill],
+        ['手势提示关闭', document.querySelector('#phoneGestureHint button')],
+    ]);
     if (!bodyWasCollapsed) document.body.classList.remove('sidebar-collapsed');
 
     // ---- 5) 键盘起来，目录浏览器要顶得动 ----------------------------------------------------------
@@ -184,15 +221,19 @@
         const probe = () => Math.round(content.getBoundingClientRect().bottom);
         html.style.setProperty('--kb-native-h', '0px'); await sleep(400);
         const at0 = probe();
-        html.style.setProperty('--kb-native-h', '320px'); await sleep(500);
+        html.style.setProperty('--kb-native-h', '320px'); await sleep(600);
         const atKb = probe();
+        // 顶边要在**键盘还顶着**的时候量。旧写法先把 `--kb-native-h` 清掉再读 rect，读到的是复原途中
+        // （这条面带 transition）的位置 —— 1.2.332 上实测把 −256 读成了 64，一条该红的前置白捡了通过。
+        const topAtKb = Math.round(content.getBoundingClientRect().top);
+        const hAtKb = Math.round(content.getBoundingClientRect().height);
         const kbToken = cs(html).getPropertyValue('--kb-h').trim();
         html.style.setProperty('--kb-native-h', ''); await sleep(200);
         ok('前置：键盘通道活着（--kb-h 里能看见写进去的键盘高）', kbToken.indexOf('320px') >= 0, `--kb-h=${kbToken}`);
         ok('键盘弹起时目录浏览器的内容底边上抬 ≥ 300px', at0 - atKb >= 300, `底边 ${at0} → ${atKb}（抬 ${at0 - atKb}px）`);
-        // 上抬不许把顶部顶出屏幕：这一改是给内容加 margin-bottom，封顶仍靠它自己的 max-height。
-        ok('键盘弹起时目录浏览器的顶边仍在可视区内', content.getBoundingClientRect().top >= -1,
-           `top=${Math.round(content.getBoundingClientRect().top)}`);
+        // 上抬不许把顶部顶出屏幕：留白和封顶要一起按键盘高算，只加 margin 会把整块顶出去。
+        ok('键盘弹起时目录浏览器的顶边仍在可视区内（键盘状态量）', topAtKb >= -1,
+            `top=${topAtKb}、盒高 ${hAtKb}px、屏高 ${innerHeight}`);
     }
     if (v.closeAndroidFolderBrowser) v.closeAndroidFolderBrowser();
     if (v.peJob) { v.cancelPhoneExport(); for (let i = 0; i < 40 && v.peJob; i++) await sleep(300); }

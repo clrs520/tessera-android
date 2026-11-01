@@ -15,11 +15,11 @@ TMP=/c/Users/Xingcong/AppData/Local/Temp
 PKG=com.tdashcam.studio
 run() { CDP_TIMEOUT_MS="${2:-240000}" ADB_SERIAL="$DEV" node devtools/cdp-eval.mjs --file "$(cygpath -w "$1")" 2>&1 | tail -1; }
 show() { node -e "
-const fs=require('fs');const s=fs.readFileSync('$1','utf8');let o=null;
+const fs=require('fs');const s=fs.readFileSync(process.argv[1],'utf8');let o=null;
 try{o=JSON.parse(s);}catch(e){console.log('RAW '+s.slice(0,200));process.exit(0);}
 if(o.threw||o.fatal){console.log('THREW '+JSON.stringify(o).slice(0,200));process.exit(0);}
-console.log('$2 pass='+(o.pass||[]).length+' fail='+(o.fail||[]).length+' notes='+JSON.stringify(o.notes||{}));
-(o.fail||[]).forEach(x=>console.log('   x '+String(x).slice(0,120)));"; }
+console.log(process.argv[2]+' pass='+(o.pass||[]).length+' fail='+(o.fail||[]).length+' notes='+JSON.stringify(o.notes||{}));
+(o.fail||[]).forEach(x=>console.log('   x '+String(x).slice(0,120))); " "$(cygpath -w "$1")" "$2"; }
 adb_run() { MSYS_NO_PATHCONV=1 "$ADB" -s "$DEV" shell "$@"; }
 
 adb_run "pm enable $PKG >/dev/null; am force-stop com.liangqing.photos; am force-stop $PKG; am start -n $PKG/.MainActivity >/dev/null"

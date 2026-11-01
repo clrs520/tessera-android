@@ -6656,7 +6656,10 @@ html.touch-ui .filter-type-group .choice-segment {
         align-items: center;
         gap: 6px;
         max-width: calc(100vw - 44px);
-        height: 34px;
+        /* R207：34 → 40。这一颗是「导出中」唯一的屏内入口，判据量到的是样式盒 34px
+           （`#exportPill` 用 height 定死，不像别的控件有 min-height 兜底）。底部锚定，加高只往上长，
+           不会压到进度条那一层。 */
+        height: 40px;
         margin: 0;
         padding: 0 13px;
         border: 1px solid var(--glass-edge);
@@ -10264,9 +10267,15 @@ html.sheet-mode #filePathModal.modal-overlay {
 
 /* R207：目录浏览器原来完全不参与 `--kb-h` —— 键盘弹起来时底部那几行被盖住，而同一批
    iOS 抽屉（筛选面等）都会按键盘高度上抬。这里补同一条通道：`--kb-h` 取原生与
-   visualViewport 两条里更深的那个（styles.css:15），底部留白按它长。 */
-html.touch-ui #androidDirModal .modal-content {
-    max-height: none;
+   visualViewport 两条里更深的那个（styles.css:15），底部留白按它长。
+   两条要一起改：只加 margin-bottom 的第一版把整块 805px 高的盒子顶到屏幕上缘之外
+   （实测顶边 64 → −256，标题与「上一级」跑掉），因为封顶那条还按整屏算。
+   可用高 = 视口 − overlay 上下内边距(34) − 安全区 − 键盘高。
+   选择器写成 `.sheet-mode.touch-ui` 而不是单挂 `.touch-ui`：同特异度的 `html.sheet-mode`
+   那条更靠后，会把 max-height 原样盖回去（第一版那句 `max-height:none` 就是这么变成死码的）。
+   横屏这一面是居中的卡片，不参与本条，维持原状。 */
+html.sheet-mode.touch-ui #androidDirModal .modal-content {
+    max-height: calc(var(--viewport-h) - 34px - var(--safe-top) - var(--safe-bottom) - var(--kb-h, 0px));
     margin-bottom: calc(12px + var(--kb-h, 0px));
 }
 
