@@ -1197,12 +1197,50 @@ function hasNativeBridge() {
  * older build without the method, answers nothing, so callers branch on the returned function
  * rather than on a platform name. `TDashcamNative` is the name an iOS shell registers too.
  */
+/**
+ * R208 — how many milliseconds each bridge method holds the JS thread. A `@JavascriptInterface`
+ * call runs on the WebView's own thread, so one method that walks `/storage` while a stick is
+ * half-asleep is the shape of an ANR — and the remedy (queue the work, hand back the last computed
+ * answer) buys that stall with a stale reply, which is only worth paying where it actually stalls.
+ * Nothing here can make that slow on purpose: the emulator has no OTG volume, so the only machine
+ * that has the number is the phone. Hence the ledger rides in 「复制诊断」.
+ *
+ * Worst-first, because the paste has to answer 「哪个调用最占」 without reading this file.
+ */
+const bridgeCost = new Map();
+
+function recordBridgeCost(name, ms) {
+    const entry = bridgeCost.get(name);
+    if (!entry) bridgeCost.set(name, { n: 1, first: ms, max: ms, sum: ms });
+    else { entry.n++; entry.sum += ms; if (ms > entry.max) entry.max = ms; }
+}
+
+function describeBridgeCost(limit = 8) {
+    if (!bridgeCost.size) return '';
+    const rows = [...bridgeCost.entries()]
+        .map(([name, e]) => ({ name, ...e }))
+        .sort((a, b) => b.max - a.max)
+        .slice(0, limit);
+    const ms = (x) => x < 1 ? x.toFixed(2) : x.toFixed(1);
+    return rows.map((r) => `${r.name} max=${ms(r.max)}ms n=${r.n} first=${ms(r.first)} avg=${ms(r.sum / r.n)}`).join(' | ');
+}
+
+/** Time one synchronous bridge call, then hand back exactly what the bridge returned. */
+function withBridgeCost(name, call) {
+    const t0 = performance.now();
+    try {
+        return call();
+    } finally {
+        recordBridgeCost(name, performance.now() - t0);
+    }
+}
+
 function nativeMethod(name) {
     const bridge = window.TDashcamNative;
     if (!hasNativeBridge() || typeof bridge[name] !== 'function') return null;
     return (...args) => {
         try {
-            return bridge[name](...args);
+            return withBridgeCost(name, () => bridge[name](...args));
         } catch (e) {
             console.warn(`[nativeMethod ${name}] failed:`, e);
             return undefined;
@@ -1226,7 +1264,7 @@ function nativeFire(name, ...args) {
     const bridge = window.TDashcamNative;
     if (!hasNativeBridge() || typeof bridge[name] !== 'function') return false;
     try {
-        bridge[name](...args);
+        withBridgeCost(name, () => bridge[name](...args));
         return true;
     } catch (e) {
         console.warn(`[nativeFire ${name}] failed:`, e);
@@ -19829,6 +19867,11 @@ class TeslaCamViewer {
             // 页面判定重扫没有。少了哪一段，下次就该修那一段。
             lines.push(`volume rx=${this.volumeEvents || 0} auto=${this.volumeAutoScans || 0} last=${this.volumeLast || '-'} | ${await this.volumeNativeStats()}`);
         }
+        // R208 — 「插上大容量盘以后点开目录浏览器要等一下」只在那台机器上有数：哪个桥调用真的占住了
+        // JS 线程、占了几毫秒。模拟器上没有 OTG 卷，这里读到的永远是几毫秒，所以这一行是给真机
+        // 自己带出来的证据，不是本机的验收数。改桥的线程模型之前，先要这张表。
+        const bridgeLine = describeBridgeCost();
+        if (bridgeLine) lines.push(`bridge (ms the JS thread waited, worst first): ${bridgeLine}`);
         // The stutter report is 「几路流畅，但其中一路卡」 — a claim about six independent pipelines.
         // The one line that can confirm it (how far behind the shared clock, how much file it still
         // holds, how many frames the decoder dropped) only exists on the <video> elements, and a phone
@@ -19862,6 +19905,9 @@ class TeslaCamViewer {
             }
         }
         const text = lines.join('\n');
+        // What the user is about to paste, kept for the acceptance probe: 「这一行有没有进诊断」 is a
+        // claim about this string, and clipboard reads from the WebView need a focused document.
+        this.lastDiagnosticsText = text;
         console.log('[diagnostics]\n' + text);
         const ok = await copyTextToClipboard(text);
         this.showToast(ok ? translations.diagCopied : `${translations.diagFailed}: ${this.lastError || ''}`, ok ? 'success' : 'error', 3000);

@@ -16240,11 +16240,45 @@ md5 `1bdf6ef159e3be4606ed2ab73b1f8a12`，sha256 `c0921077d82619f85183f460aab6aee
 本批一行未动 —— 改动全在 Kotlin 服务生命周期与导出文件名上，而导出这一面被上面 r206 的三次完整导出
 + 两次取消 + 一次中途拨钟，以及 r149 走遍了。下一轮补跑，补不到就仍然挂着。
 
+### 4b. R208 那一轮把这一节的两条判据缺陷挖了出来（1.2.333/1.2.334 复测）
+
+复测时先拿到 **15 绿 / 2 红**，两条红都不是产品的：
+
+1. **`am stopservice $PKG/$PKG.ExportService`（位置参数）根本没停服务**。logcat 里那条 intent 是
+   `act=android.intent.action.MAIN cat=[LAUNCHER] cmp=…/.ExportService` ⇒ `Error stopping service`。
+   ⇒ 这一条要改的是**判据**：改前那一版（1.2.330）拿它量到的「照常跑完 done」是真的（服务没被停，
+   任务当然跑完），而 1.2.331 上量到的 `cancelled` **不是**这条命令停出来的 —— 那就是个假绿。
+   现在用 `am stopservice -n` 并把 `am` 的回执钉成前置（回执里出现 `Error` 就红在工具上）。
+2. **`/^10:0/` 匹配钟面**：guest 的 `date` 打的是 UTC（`… GMT`），而 `date -s '2026-10-31 10:00:00'`
+   按本地时区解释 ⇒ 名义「回拨 2 小时」实际只向前挪了 24 分钟，判据永远读不到那个字符串（假红）。
+   现在按设备自己的 epoch 算目标（`date -s @$((E0-7200))`），前置比的是 `E1-E0 <= -3600`。
+   顺带发现**拨钟要 root**：非 root 的 `date -s` 回 `Operation not permitted`，钟根本没动 ⇒ 脚本开头加 `adb root`。
+
+第三条是同一轮里改的形状问题：4 路 × 15 s 这份夹具在 AVD 上整单只 ~18 s，8 秒的两段窗口会让
+「拨钟后」那一段直接跨过终点（实测 15 → 68 → done）。窗口缩到 5 s，并且**每段的秒数由采样器自己的
+`performance.now()` 时间戳算**，不再写死分母（`$WIN` 只当兜底）。
+
+改后（**1.2.334**，同一台 AVD、同一份夹具）：**18 条断言 0 红**，`notes.interfered=0`（这一轮 log 里
+`app is not running` 一条都没有）：
+
+```
+N6 线程 3 → 2（重建 3 次，页面每次都换了一份）
+N4 拨钟前 1.95 条/秒（6.7 s）→ 拨钟后 0.99 条/秒（7.1 s）｜百分比 15→46→63→100，这一单仍然 done
+N3 停服务后 cancelled，附注码 cancelledKept、frames=304、产物带 (2) 序号；前台通知 0
+N5 差集里只出现 .mp4.part，没有 .mp4 孤儿
+导出期间 ExportService 前台身份 = 1（取这一数那一刻 job 确实还在跑）
+```
+
+也就是说 §4 那条「N3 服务被停掉之后任务要收手」的结论**现在才真的成立**（此前是被位置参数骗过的假绿）。
+`darkSome` 与 `cancelledKept` 谁该上屏那一问，这次拿到的读数是 `cancelledKept`（半路停的单，产物留在半截）。
+
 ## 5. 剩下的账
 
 - **同步桥仍在主线程做 FUSE IO**（R203 第 4 批清单上的一条，本轮**没做**）：`MainActivity` 的同步问答里
   有会落到外接存储的路径，慢 FUSE 上就是 ANR 的形状。动手前要先量出「哪几个调用真的落到 FUSE、最坏多少毫秒」——
   按表面对称去改会把不走 FUSE 的分支也拖进线程池。留作下一批第一条。
+  **R208 已把量具交出去**（`bridge …` 那一行进「复制诊断」，本机数表见 R208 §4：AVD 上没有 OTG 卷，
+  那只是下界），改不改等真机贴回来的那一行。
 - **`.part` 永不回收**：崩掉的作业会在下载目录留下 `<名>.mp4.part`。界面看不见（JS 的「最近导出」
   按 `.mp4` 结尾过滤），但文件管理器里会攒。要么起单时顺手删同前缀的旧 `.part`，要么按 mtime 清 ——
   先记账，本批不做（做就要定「多旧算旧」，而那是要拍的设计取向）。
@@ -16373,4 +16407,129 @@ r186-batch-delete 17/0   r185-scroll-chip 5/0            合计 257/0
 - `.pe-tile-grip`（导出画格搬运柄）这一轮仍没走到：它只在「摆放编辑」面里画，AVD 上要把那一面开到
   能量的状态需要真素材 + 预览帧，判据把它记成 `notes` 而不是绿。
 - 1.2.332 是本轮内的中间包（未发布、同名覆盖过一次），最终交付并打 tag 的是 **1.2.333**。
-- R206 §5 那几条仍挂着：FUSE sync 桥、`.part` 无人回收、`darkSome` 与 `cancelledKept` 的措辞。
+- R206 §5 那几条仍挂着：FUSE sync 桥（量具已交，见 R208）、`.part` 无人回收、`darkSome` 与 `cancelledKept` 的措辞。
+
+# R208 —— 第 6 批：同步桥的耗时台账（这台机器上量不到，就让 APP 自己把数带出来）
+
+用户回「请继续，不要停，一次性搞完」⇒ 接着按 R206 §5 的第一条动手。
+
+## 1. 为什么这一批交的是量具，不是修法
+
+R206 §5 那句话是「动手前要先量出哪几个调用真的落到 FUSE、最坏多少毫秒 —— 按表面对称去改会把不走 FUSE 的
+分支也拖进线程池」。这条纪律在 AVD 上兑现不了：`r208-bridge-cost.js` 数出来的 `usbVolumes=0`（模拟器没有
+OTG 卷），所有桥调用压在 emulated storage 上都是几毫秒，**永远够不到 5 秒的输入超时**。
+所以改线程模型的证据只可能在插着 1.9 TB 盘的那台真机上，而真机不能插 USB 探针 ⇒ 让 APP 自己带数：
+每一次同步桥调用占住 JS 线程多久，记进台账，随「复制诊断」一起贴回来。
+
+## 2. 交的东西（全在手机才有的分支上，桌面一字未动）
+
+| 位置 | 内容 |
+|---|---|
+| `src/script.js:1210-1236` | `bridgeCost` 台账（每方法 `n / first / max / sum`）、`recordBridgeCost`、`describeBridgeCost`（最占的那一次从大到小）、`withBridgeCost` |
+| `src/script.js:1238`（`nativeMethod`）+ `:1263`（`nativeFire`） | 两个门面各自把一次同步调用包进 `withBridgeCost`；`hasNativeBridge()` 的 guard **仍在计时之前**，所以桌面上台账恒空 |
+| `src/script.js:19873-19874` | 诊断多一行 `bridge (ms the JS thread waited, worst first): …`，台账空就不画这一行 |
+| `src/script.js:19910` | `this.lastDiagnosticsText`：判据要断言「这一行进得了粘贴板」，读的就是产品自己拼出来的那份字符串 |
+
+桥方法没有一处绕过门面（`grep TDashcamNative` 只剩注释），所以台账就是全部。
+
+## 3. 先红后绿
+
+判据 `devtools/r208-verify.sh`（冷启动 → `r208-verify.js` → 顺带把数表打出来）。
+
+**改前（1.2.333）= 1 绿 1 红**，红得没有歧义 —— 桥在，量具不在：
+
+```
+o 前置：这是安卓壳，桥在（否则整套没有被测对象） = hasNativeBridge=true
+x 前置：台账函数在这个包里（describeBridgeCost） = undefined
+```
+
+**改后（1.2.334，28,544,727 B，md5 `d27d777592425ddaf47f7e2d02fde9c8`，sha256 `b0907e60a74cfc27d2267ab5362f56e701f0ba60b4c4184fa0ddd757b0133b48`）= 13 条 0 红**：
+台账非空、冷启动里页面自己就调过 `storageVolumes`、每条数算得出来（`first`/`avg` 都不超过 `max`）、
+排序真的从大到小、门面加了计时仍交回桥原话（`volumeStats` 逐字相等）、不存在的方法仍 resolve `null` 且**不记账**、
+「复制诊断」里看得见这一行且没挤掉 `volumes=` / `volume rx=` 两行。
+`notes`：`storageVolumes n=3 first=14.2 max=14.2 avg=5.2`（冷启动那一拍的桥线程占用，页面自己那一次）。
+
+## 4. 本机数表（**下界**；真机跑同一支探针才算数）
+
+`devtools/r208-bridge-cost.js`，装机后第一次，每方法 12 拍，单位 ms：
+
+| 方法 | first | max | median |
+|---|---|---|---|
+| `storageVolumes`（第一次） | 2.5 | 2.5 | 0.6 |
+| `storageVolumes`（之后） | 0.7 | 0.7 | **0.1** |
+| `appFilesDir` | **52.1** | 52.1 | 3.9 |
+| `nativeStatus` | 1.9 | 2.5 | 1.5 |
+| `notificationsAllowed` | 1.5 | 1.5 | 0.7 |
+| `exportCodecReport` | 1.4 | 1.8 | 1.1 |
+| `systemBrightness` | 1.4 | 1.4 | 0.8 |
+| `shareFile`（不存在的路径，只走到 `File.isFile`） | 1.3 | 1.3 | 0.5 |
+| `volumeStats`（纯计数器，不碰盘） | 0.5 | 0.9 | 0.5 |
+| `exportStatus` | 0.4 | 1.1 | 0.3 |
+
+读出来的三件事：
+
+1. **`storageVolumes` 的 `first` 与 `after` 差一个量级**（0.6 → 0.1 median）—— 那正是
+   `MainActivity.kt:900-908` 的「缓存为空就当场算一遍」那一支；本机只 2 ms，因为它算的是 emulated 那几个卷。
+2. **`appFilesDir` 首次 52 ms**（`MainActivity.kt:343`：`getExternalFilesDir` + `mkdirs` + `isDirectory`），
+   同一支探针第二次冷启动只 5.1 ms ⇒ 那 52 ms 是**目录第一次被建出来**的成本，不是稳态成本。
+   这条比 R206 §5 原来点名的 `storageVolumes` 更值得盯。
+3. `volumeStats` / `exportStatus` 是纯计数器（`MainActivity.kt:1116` 只拼几个字段），把它们挪下线程池是白付代价 ——
+   这就是「按表面对称去改」会犯的错，现在有了数，不必猜。
+
+## 5. 这一批为判据自己付的三条学费
+
+- **拿 `storageVolumes` 断言「点复制诊断会让台账变长」会假红**：`getStorageVolumes(false)`
+  （`script.js:2818`）命中页面自己那份 `storageVolumesPayload` 就不再问桥，实测 `n 3 → 3`。
+  改成每次必问的 `exportCodecReport`。⇒ 「走没走门面」要挑**没有 JS 缓存**的那一条。
+- **runner 用 `tail -1` 取探针输出**：探针返回 pretty JSON（`JSON.stringify(out, null, 1)`）会被截成 `}`，
+  数表整张读不回来。探针一律压缩返回、pretty 只进 `console.log`。
+- **「冷启动」这件事判据要自己钉住**：runner 重启 APP 不算证据，页面自己的 `performance.now()` 才算 ——
+  现在钉住 <120 s，否则台账里的 `first` 可能来自半小时前那次开屏。
+
+## 6. 等真机数回来再做的那一步
+
+诊断里 `bridge …` 那一行若显示 `storageVolumes first` 到几百 ms 以上（或 `appFilesDir first` 更大），
+就把 `storageVolumesJson()` 的 `cached ?: computeStorageVolumesJson()` 改成
+`cached ?: 空清单`，让第一拍交「正在读盘」而不是把整份清单算在桥线程上；
+`appFilesDir()` 同理（它只在开机与导出目录解析时被问一次，先要数才知道值不值得）。
+没有那一行数字以前不动 —— 现在的行为（第一次就把清单交齐）对界面是有用的：目录浏览器与「最近目录」chip
+第一拍就有内容，改成异步会让首拍空一次。
+
+## 7. 这一轮的验收账（说清楚哪些是量过的）
+
+**量过并 0 红的（都在交付的那一份 1.2.334 上，AVD `emulator-5554`，API 36）**：
+
+- `devtools/r208-verify.sh` 台账判据 **13 条 0 红**（§3）。这 13 条跑完之后又加了一条前置
+  「这就是刚起来的那一份页面（`performance.now() < 120 s`）」—— **这条新前置没再跑过一次**，
+  下面的环境事故把设备拿走了。下一轮补跑，补到之前它不算通过。
+- `devtools/r206-verify.sh` **18 条 0 红**（R206 §4b：两处判据缺陷改完之后复测）。
+- `devtools/r204-scan-cache.sh` **5 条 0 红**（R206 §4 里那条「没能复测」的账，本轮清了）。
+  它本轮才跑通的真正原因是夹具步骤后面缺一次冷启动：整棵目录被 adb 删掉重建之后，
+  进程手里还握着删除前的列表，`loadTauriDirectory` 每步回 `loaded:false`、基线永远读到 `groups:21`
+  （里面带着盘上已经不存在的 `2026-08-02_11-59-*`）。加了 `== 0b) 冷启动` 之后基线第一拍就是 20。
+  ⇒ 「换了盘上的结构」这类夹具，**换完必须重开进程**；`scan_index_dirty` 只清清单缓存，不清内存里那份列表。
+- `devtools/r208-bridge-cost.js` 数表两拍（§4）。
+
+**没跑成的（不算通过，也不记成缺陷）**：1.2.334 的整套回归 —— `r102-verify`（竖屏 92）、
+`r207-verify` / `r207-landscape`（13 + 2）、`r173-verify`（40）、`r102-verify-landscape`（36）。
+本轮改的正是 `script.js` 的门面（台账），竖屏那一套对它最敏感，所以这一账不能含糊：
+`Activity` 确实在前台（`topResumedActivity=com.tdashcam.studio/.MainActivity`、`pidof` 有值、
+`webview_devtools_remote_<pid>` socket 也在），但 `Runtime.evaluate` 从某一次起**永远不回话** ——
+连 `1+1` 都不答，`force-stop + start` 两轮也没救回来。是这台 AVD 的 WebView 废了，不是包坏
+（同一份包在二十分钟前还答完过 r206 那 18 条）。
+
+设备这一轮另外添的两笔账，写在这里免得下次当成产品现象去查：
+
+1. **`/sdcard` 上 `rm` 回 `Bad address`**：r204 夹具（60 个平铺分钟 = 360 个 `touch`）之后
+   `adb shell rm` 成片报 `Bad address`，再往后 adb 层整个卡住（`adb devices` 认设备、`shell` 静默无输出）。
+   救回来的是 `adb -s emulator-5554 emu restart`（客户机重启，不是杀宿主机进程），起来后 `rm` 正常。
+   判据的夹具步骤里那些 `rm` **不许静默失败**：r204 现在会在换完夹具后自己报「目录 20 个（要 20）、平铺 0 个（要 0）」。
+2. **外部自动化反复把我们置成 `enabled=3`**：`am start` 回 `Error type 3 Activity class … does not exist`
+   而 `pm path` 照样解析得出。r206 / r208 / r207 回归的 runner 现在都在起跑前自己 `pm enable`，
+   并且把 `am` 的回执钉成前置（R206 §4b 第 1 条就是这类假绿的代价）。
+
+⇒ **1.2.334 只交 APK（根目录 `Tessera-1.2.334.apk`），不打 tag、不发 Release**：
+这一轮改的是桥门面，桌面侧靠「guard 先于计时」这条结构保证不受影响，手机端要的是那 92 条竖屏账 ——
+等设备能答话了把上面四套跑完再发。
+
+

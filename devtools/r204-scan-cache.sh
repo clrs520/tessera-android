@@ -52,6 +52,16 @@ echo "== 0) 把盘换成「旧结构」：RecentClips 里 20 个「一分钟一�
 # adb shell 里被 MSYS 改写成了 `<git安装>/sdcard/...`，静默失败 ⇒ 盘上根本没换结构，
 # 于是「刷新换没换列表」量的是夹具而不是缓存。
 adb_run "mkdir -p $D/RecentClips; rm -f $D/RecentClips/*.mp4; i=0; while [ \$i -lt 20 ]; do d=\$(printf '2026-08-01_10-%02d-00' \$i); mkdir -p $D/RecentClips/\$d; for c in front back left_repeater right_repeater left_pillar right_pillar; do touch $D/RecentClips/\$d/\$d-\$c.mp4; done; i=\$((\$i+1)); done; sync"
+# 夹具自己要说实话：`rm` 在 FUSE 上回过 `Bad address`（本轮实测），静默失败的话后面比的就不是缓存了。
+echo "   夹具现在：目录 $(adb_run "ls -1 $D/RecentClips 2>/dev/null | grep -c 2026-08-01_10-") 个（要 20），平铺 mp4 $(adb_run "ls -1 $D/RecentClips/*.mp4 2>/dev/null | wc -l" | tr -d '\r') 个（要 0）"
+
+echo "== 0b) 冷启动：基线不能带上一份清单起来"
+# 上一轮就是栽在这里：夹具是**整棵删掉再建**的，而 APP 进程手里还握着删除前的列表，
+# `loadTauriDirectory` 每一步都回 `loaded:false`、列表永远停在旧结构（实测基线读到 groups:21，
+# 里面还带着盘上已经不存在的 2026-08-02_11-59-*）。`scan_index_dirty` 只清盘上的清单缓存，
+# 清不掉进程内存里那份 ⇒ 基线之前先重开一次，让「看见基线」这件事从头发生。
+adb_run "pm enable com.tdashcam.studio >/dev/null; am force-stop com.liangqing.photos; am force-stop com.tdashcam.studio; am start -n com.tdashcam.studio/.MainActivity >/dev/null"
+sleep 20
 
 echo "== 1) 等 APP 真的看见这份基线（顺带把缓存记成它）"
 # APP 进程在 FUSE 上对刚被换过的目录会有一段旧视图（实测：`adb ls` 已经是新结构，APP 的扫描

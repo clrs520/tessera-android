@@ -29,7 +29,8 @@ TMP=/c/Users/Xingcong/AppData/Local/Temp
 P="$TMP/r206-probe-$$"
 R="$TMP/r206-assert-$$"
 VALS="$TMP/r206-values-$$"
-trap 'rm -f "$P" "$R" "$VALS"' EXIT
+KCNT="$TMP/r206-kills-$$"
+trap 'rm -f "$P" "$R" "$VALS" "$KCNT"' EXIT
 # 同一台设备不允许两个夹具在跑（拨钟 / 停服务 / 杀进程互相抢前台，测出来的全是假数）。
 # 本机没有 pgrep，所以用 `mkdir` 的原子性做锁；一轮跑满约 12 分钟，留 40 分钟当僵尸锁的宽限。
 LOCK="$TMP/r206.lock"
@@ -42,12 +43,21 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   echo "   锁已经 $((AGE / 60)) 分钟没动，按僵尸锁接管" >&2
   rm -rf "$LOCK"; mkdir "$LOCK" || exit 1
 fi
-trap 'rm -rf "$LOCK"; rm -f "$P" "$R" "$VALS"' EXIT
+trap 'rm -rf "$LOCK"; rm -f "$P" "$R" "$VALS" "$KCNT"' EXIT
 PKG=com.tdashcam.studio
+# `am stopservice` 的位置参数会被包成 MAIN/LAUNCHER intent（本轮实测 logcat：
+# `Intent { act=android.intent.action.MAIN cat=[...LAUNCHER] cmp=com.tdashcam.studio/.ExportService }`
+# 然后 `Error stopping service`）—— 组件名对了但动作不对，服务根本没停，于是 N3 的两条判据
+# 读到的「照常跑完」是**工具没动手**，不是产品没收手。必须用 `-n`。
 SVC="$PKG/$PKG.ExportService"
 FIX=/sdcard/TeslaCamR206
 REG=/storage/emulated/0/TeslaCamR206
+# 拨钟前后的两段采样窗口。AVD 上这份夹具（4 路 × 15 s）整单约 18 s 编完，8 s 的窗口
+# 会让「拨钟后」那一段直接跨过终点（本轮实测：15 → 68 → done，前置红）。窗口和判据里的
+# 分母是同一个变量 —— 分母写死会把「几条/秒」算成假的。
+WIN="${WIN:-5}"
 : > "$VALS"
+: > "$KCNT"
 
 adb_run() { MSYS_NO_PATHCONV=1 "$ADB" -s "$DEV" shell "$@"; }
 probe() { cat > "$P" <<PEOF
@@ -58,7 +68,29 @@ keep() { printf '%s\t%s\n' "$1" "$2" >> "$VALS"; }
 pool_count() { adb_run "PID=\$(pidof $PKG); [ -z \"\$PID\" ] && { echo -1; exit 0; }; n=0; for t in /proc/\$PID/task/*; do c=\$(cat \$t/comm 2>/dev/null); case \"\$c\" in pool-*) n=\$((n+1));; esac; done; echo \$n"; }
 fgs_count() { adb_run "dumpsys activity services $PKG | grep -A6 ExportService | grep -c 'isForeground=true'"; }
 # 采样器读出来的那一条（含作业是否还在跑）
-tail_probe() { probe '(async () => { const s = (window.__r206 && window.__r206.samples) || []; const t = s[s.length-1] || null; return JSON.stringify({ percent: t && t.percent, frames: t && t.frames, n: s.length, term: window.__r206 && window.__r206.term && window.__r206.term.phase, job: !!window.viewer.peJob }); })()' 30000; }
+# 这台模拟器上现在有外部动作在反复 `pm disable` 我们（logcat 里是 `am_kill … change com.tdashcam.studio`），
+# 进程半路没了 ⇒ 采样窗口全空 ⇒ 一长串「前置不成立」。那种红要说成**被别人打断**，不许记在产品头上，
+# 所以每一次取不到数就数一下进程还在不在，把次数记进 `$KCNT`（一行一次）带进判据的 notes。
+tail_probe() {
+  local r; r="$(probe '(async () => { const s = (window.__r206 && window.__r206.samples) || []; const t = s[s.length-1] || null; return JSON.stringify({ percent: t && t.percent, frames: t && t.frames, n: s.length, tFirst: s.length ? s[0].t : null, tLast: t && t.t, term: window.__r206 && window.__r206.term && window.__r206.term.phase, job: !!window.viewer.peJob }); })()' 30000)"
+  case "$r" in *\{*) : ;; *) r="" ;; esac
+  if [ -z "$r" ] || [ -z "$(adb_run 'pidof '"$PKG" | tr -d '\r\n')" ]; then
+    # 计数写文件：`$(tail_probe)` 是子 shell，变量自增出了子 shell 就没了 ——
+    # 上一版就这样把「被打断 5 次」报成 `interfered: 0`，一条假清白比没有更坏。
+    echo +1 >> "$KCNT"
+    echo "app is not running"
+  else
+    printf '%s\n' "$r"
+  fi
+}
+
+# 拨钟要 root：普通 shell 的 `date -s` 回 `Operation not permitted`（本轮实测，非 root 时那条判据
+# 只能读到一个没动过的钟面）。`adb root` 会重启 adbd —— 端口转发随之没了，但 cdp-eval 每次都重新
+# forward，所以只要在这里做、别在采样中途做就行。
+"$ADB" -s "$DEV" root >/dev/null 2>&1; sleep 3; "$ADB" -s "$DEV" wait-for-device >/dev/null 2>&1
+if [ "$(adb_run 'id -u' | tr -d "\r")" != "0" ]; then
+  echo "!! adbd 不是 root —— N4 的拨钟会被系统拒绝，这一轮的 N4 两条不成立" >&2
+fi
 
 # 起跑模板：把 __CAMERAS__ 换成相机集合。这一步一律用**这一盘能给的每一路**（实测 4 路）：
 # 单路 3 s 的片子 10 s 就编完了，量不到「中途」，拨钟 / 停服务 / 杀进程都要在作业还在跑的时候动手。
@@ -116,6 +148,11 @@ else
 fi
 
 echo "== 0b) 前置：APP 在前台、真片解得动、取到一帧（ThumbFetcher 的线程得先生出来）"
+# 本机上一轮踩过：第三方自动化把我们置成 `enabled=3`，`am start` 只回 `Error type 3
+# Activity class … does not exist`（而 `pm path` 照样解析得出）—— 于是整轮变成「页面不回话」的假前置。
+# 起跑前自己把开关拨回来，并清掉已知会抢前台、把我们 WebView 冻住的那个相册包。
+"$ADB" -s "$DEV" shell pm enable "$PKG" >/dev/null 2>&1
+adb_run "am force-stop com.liangqing.photos" >/dev/null 2>&1
 adb_run "am force-stop $PKG; am start -n $PKG/.MainActivity >/dev/null"
 sleep 16
 PREP="$(probe '(async () => {
@@ -202,17 +239,24 @@ W0="$(probe '(async () => {
   return JSON.stringify({ percent: last(), n: s.length, job: !!window.viewer.peJob, term: st.term && st.term.phase });
 })()' 240000)"; echo "   等到稳态 $W0"; keep W0 "$W0"
 A0="$(tail_probe)"; echo "   稳态起点 $A0"; keep A0 "$A0"
-sleep 8
+sleep "$WIN"
 A="$(tail_probe)"; echo "   拨钟前 $A"; keep A "$A"
-adb_run "settings put global auto_time 0; date -s '2026-10-31 10:00:00'" >/dev/null
-sleep 8
+# 拨多少、朝哪个方向，一律由**设备自己的epoch**算，不写死钟面字符串：
+# 上一版写 `date -s '2026-10-31 10:00:00'`，而 guest 的 `date` 打的是 UTC、本地钟面在 Asia/Shanghai
+# 是 UTC+8 ⇒ 名义「回拨 2 小时」实际只向前挪了 24 分钟，且判据 `/^10:0/` 永远读不到（假红）。
+# 现在：E0 → 拨回 2 小时 → E1，判据比的是 |E1 − E0| 这个单调量。
+E0="$(adb_run 'date +%s' | tr -d '\r')"; echo "   拨钟前 epoch = $E0"; keep EPOCH0 "$E0"
+TARGET=$(( E0 - 7200 ))
+adb_run "settings put global auto_time 0; date -s @$TARGET" >/dev/null
+E1="$(adb_run 'date +%s' | tr -d '\r')"; echo "   拨钟后 epoch = $E1（目标 $TARGET）"; keep EPOCH1 "$E1"
+sleep "$WIN"
 B="$(tail_probe)"; echo "   拨钟后 $B"; keep B "$B"
-JUMPED="$(adb_run "date '+%H:%M'")"; echo "   设备钟面 = $JUMPED"
+JUMPED="$(adb_run "date '+%F %T %Z'")"; echo "   设备钟面 = $JUMPED"
 keep JUMPED "$JUMPED"
 FGSN="$(fgs_count)"; FGSJOB="$(tail_probe)"; echo "   期间前台的 ExportService 记录 = $FGSN（取这一数时作业 = $FGSJOB）"; keep FGSN "$FGSN"; keep FGSJOB "$FGSJOB"
 sleep 8
 C="$(tail_probe)"; echo "   再等一轮 $C"; keep C "$C"
-adb_run "settings put global auto_time 1; date -s '$(date -u '+%Y-%m-%d %H:%M:%S')'" >/dev/null
+adb_run "settings put global auto_time 1; date -s @$(( $(date -u +%s) ))"; echo "   钟已交回系统自动校时"
 
 echo "== 3) 等这一单跑完（中途拨了钟也得成功）"
 DONE='{}'
@@ -227,7 +271,7 @@ echo "== 4) N3 服务被停掉：任务要收手、通知要撤"
 START2="$(probe "$(all_cams)" 180000)"; echo "   $START2"; keep START2 "$START2"
 sleep 15
 BEFORE_STOP="$(tail_probe)"; echo "   停之前 $BEFORE_STOP"; keep BEFORE_STOP "$BEFORE_STOP"
-adb_run "am stopservice $SVC"
+STOP_OUT="$(adb_run "am stopservice -n $SVC" | tr -d '\r')"; echo "   am 回执：$STOP_OUT"; keep STOP_OUT "$STOP_OUT"
 sleep 18
 STOP="$(probe '(async () => {
   const s = (window.__r206 && window.__r206.samples) || [], t = window.__r206 && window.__r206.term;
@@ -237,7 +281,7 @@ STOP="$(probe '(async () => {
 })()' 30000)"
 echo "   停服务之后 $STOP"; keep STOP "$STOP"
 NOTI="$(fgs_count)"; echo "   还挂着前台的 ExportService = $NOTI"; keep NOTI "$NOTI"
-if [ "$(printf '%s' "$STOP" | sed -n 's/.*"job":true.*/Y/p')" = "Y" ]; then adb_run "am stopservice $SVC"; fi
+if [ "$(printf '%s' "$STOP" | sed -n 's/.*"job":true.*/Y/p')" = "Y" ]; then adb_run "am stopservice -n $SVC" >/dev/null; fi
 
 echo "== 5) N5 进程半路死掉：不许留同名 .mp4 孤儿"
 # 第一版在这里误红：它拿「作业起点算出来的正式名」去目录里 grep，可第 3 步那一单**真的成功了**，
@@ -261,6 +305,8 @@ echo "   其中 .part（这些是给 JS 过滤掉的，不算产物）：[$PARTS
 adb_run "am start -n $PKG/.MainActivity >/dev/null"; sleep 12
 
 echo "== 6) 判据"
+keep KILLS "$(wc -l < "$KCNT" | tr -d ' ')"
+keep WIN "$WIN"
 cat > "$R" <<'NODE'
 const fs = require('fs');
 const raw = fs.readFileSync(process.argv[2], 'utf8').split('\n');
@@ -273,24 +319,39 @@ const beforeStop = j(v.BEFORE_STOP) || {}, beforeKill = j(v.BEFORE_KILL) || {}, 
 const t0 = Number(v.T0), t1 = Number(v.T1);
 const pct = (o) => (o && typeof o.percent === 'number' ? o.percent : null);
 const out = { pass: [], fail: [], notes: {} };
+// 采不到数的那几次里，进程是真的不在了（`pidof` 空）—— 外部动作把我们 `pm disable` 掉时，
+// 下面一串「前置不成立」说的是这件事，不是产品。红要红得能分清是谁的手。
+out.notes.interfered = Number(v.KILLS) || 0;
 const ok = (n, cond, d) => (cond ? out.pass : out.fail).push(n + (d === undefined ? '' : ' = ' + d));
 const running = (o) => o.job === true && !o.term;
-const rate = (x, y, secs) => (((y.n || 0) - (x.n || 0)) / secs);
-const pre = rate(a0, a, 8), post = rate(a, b, 8);
+// 窗口有多长**由采样器自己的时间戳算**（每条回报都带 `performance.now()`），不由 sleep 猜：
+// sleep 之外的 probe 往返有 1～2 秒，写死的分母会把「几条/秒」算歪。
+const win = Number(v.WIN) || 5;
+const span = (x, y) => (x && y && typeof x.tLast === 'number' && typeof y.tLast === 'number' && y.tLast > x.tLast)
+    ? (y.tLast - x.tLast) / 1000 : win;
+const rate = (x, y) => ((y.n || 0) - (x.n || 0)) / span(x, y);
+const pre = rate(a0, a), post = rate(a, b);
+const preS = span(a0, a), postS = span(a, b);
 
 ok('前置：取到了一帧原生图（ThumbFetcher 真的跑过）', prep.gotFrame === true, JSON.stringify(prep));
 ok('前置：两次线程数都读到了（-1 = 进程没了）', t0 >= 1 && t1 >= 0, `T0=${t0} T1=${t1}`);
 ok('前置：拨钟那一单是多路、而且采样窗口里作业都还在跑', (start.cams || 0) >= 2 && running(a0) && running(a) && running(b), JSON.stringify([start.cams, a0.job, a.job, b.job]));
-ok('前置：设备钟面确实被拨回去了（否则 N4 测的是没发生的事）', /^10:0/.test(v.JUMPED || ''), v.JUMPED);
+// 拨钟这一条只能拿 epoch 差证明：guest 的 `date` 打的是 UTC 钟面，用它匹配「10:0」必然假红；
+// 而 `date -s` 在非 root 下是 `Operation not permitted`，钟根本没动 ⇒ 这条前置必须自己算。
+const e0 = Number(v.EPOCH0), e1 = Number(v.EPOCH1);
+const jump = e1 - e0;
+ok('前置：设备钟确实回拨了（epoch 倒走 ≥ 60 分钟，否则 N4 测的是没发生的事）', jump <= -3600,
+   `Δ=${jump} s（${v.EPOCH0} → ${v.EPOCH1}）｜钟面 ${v.JUMPED}`);
 ok('前置：停服务之前那一单还在跑（否则「收手」没得测）', running(beforeStop), JSON.stringify(beforeStop));
+ok('前置：am 的回执说服务真的停了（工具没动手 ≠ 产品没收手）', !/error/i.test(v.STOP_OUT || ''), v.STOP_OUT);
 ok('前置：杀进程那一单还在跑、且写出了真实路径', running(beforeKill) && !!v.OUT3, JSON.stringify([beforeKill.job, v.OUT3]));
 
 ok('前置：activity 真的被重建了（页面换了一份）—— 否则这条线程账测的是没发生过的事', Number(v.RC) >= 2, `重建 ${v.RC} 次`);
 ok('N6 activity 重建不泄漏线程池线程（每次重建净增 0）', t1 - t0 <= 0, `${t0} → ${t1}，重建 ${v.RC} 次`);
-// 基线窗口本身要有料：稳态里 8 秒若只出 1～2 条，比值是噪声（本轮第一版就是这么误红的）。
+// 基线窗口本身要有料：稳态里那一段若只出 1～2 条，比值是噪声（本轮第一版就是这么误红的）。
 ok('前置：拨钟前的稳态窗口里回报够密（否则「频率塌没塌」比的是噪声）', pre >= 0.4,
-   `拨钟前 8 秒 ${a.n - a0.n} 条 = ${pre.toFixed(2)} 条/秒｜百分比 ${pct(a0)}→${pct(a)}`);
-ok('N4 墙钟回拨 2 小时之后，进度回报的频率不许塌掉', pre >= 0.4 && post >= 0.4 * pre, `拨钟前 ${pre.toFixed(2)} 条/秒 → 拨钟后 ${post.toFixed(2)} 条/秒｜百分比 ${pct(a0)}→${pct(a)}→${pct(b)}→${pct(c)}`);
+   `拨钟前 ${preS.toFixed(1)} 秒 ${a.n - a0.n} 条 = ${pre.toFixed(2)} 条/秒｜百分比 ${pct(a0)}→${pct(a)}`);
+ok('N4 墙钟回拨 2 小时之后，进度回报的频率不许塌掉', pre >= 0.4 && post >= 0.4 * pre, `拨钟前 ${pre.toFixed(2)} 条/秒（${preS.toFixed(1)} s）→ 拨钟后 ${post.toFixed(2)} 条/秒（${postS.toFixed(1)} s）｜百分比 ${pct(a0)}→${pct(a)}→${pct(b)}→${pct(c)}`);
 ok('N4 中途校时不许把导出打断（这一单仍然 done）', done.term === 'done', JSON.stringify(done));
 ok('N3 服务被停掉之后任务要收手（拿到 cancelled 回执，而不是照常跑完）', stop.term && stop.term.phase === 'cancelled', JSON.stringify(stop.term));
 ok('N3 服务被停掉之后不许还挂着前台通知', Number(v.NOTI) === 0, v.NOTI);
