@@ -16476,6 +16476,65 @@ x 前置：台账函数在这个包里（describeBridgeCost） = undefined
 3. `volumeStats` / `exportStatus` 是纯计数器（`MainActivity.kt:1116` 只拼几个字段），把它们挪下线程池是白付代价 ——
    这就是「按表面对称去改」会犯的错，现在有了数，不必猜。
 
+## 4b. 真机那一拍（2026-11-01，小米 23127PN0CC / e152f205）
+
+用户把手机插上来说「试一下 CDP 能不能通」⇒ 顺带把这一节欠的那一行数读回来了。
+装的是**同一个工作树**多打的一份「release 签名 + `debuggable`」测试载具
+（`Tessera-1.2.334-testable.apk`，开关在 `app/build.gradle.kts` 的 `TDASHCAM_TEST_DEBUGGABLE=1`；
+同一把 keystore ⇒ `adb install -r` 覆盖装机不丢数据）。`dumpsys package` 确认
+`flags=[ DEBUGGABLE … ]`、`versionName=1.2.334`，`/proc/net/unix` 出现 `webview_devtools_remote_<我们的 pid>`。
+
+冷启动后页面自己那条台账（`describeBridgeCost()`，最占的先看，单位 ms）：
+
+| 方法 | max | n | first | avg |
+|---|---|---|---|---|
+| `storageVolumes` | **241.6** | 3 | 241.6 | 82.6 |
+| `nativeStatus` | 17.7 | 1 | 17.7 | 17.7 |
+| `scanKeepAlive` | 14.8 | 2 | 14.8 | 14.7 |
+| `setUiLang` | 4.4 | 1 | 4.4 | 4.4 |
+
+同一台机器上 `r208-bridge-cost.js` 十二拍的数（`storageVolumes#first` 3.2 / `appFilesDir` 2.1 /
+`exportCodecReport` 3.7 max）比上面小两个量级，因为**台账量的是「这个进程第一次问」，探针量的是「已经答过一次之后」** ——
+`MainActivity.kt:900-908` 那次「缓存为空就当场算」正好落在页面开屏的第一拍上。
+
+⇒ 结论有两条：
+1. **§6 的门槛没到**（那一步写的是「`first` 到几百 ms 以上」）。241.6 ms 是 AVD 的 100 倍，但它仍然没到
+   「值得让首拍交空清单」的那一档，而且这台机器 `/storage` 下只有 `emulated`/`self`（`usbVolumes=0`）——
+   **没有 OTG 卷的真数还是没拿到**。要拿的那个数只能来自用户插着 1.9 TB 盘时按一次「复制诊断」，
+   那一行现在自己会带上台账。
+2. 顺带看见 `scanKeepAlive` 每次 14.8 ms、扫描期间至少两拍 —— 它不在 R206 §5 的名单上，
+   但它是**唯一一个在扫描循环里反复问桥**的方法；真要动线程模型，它比 `volumeStats` 那种纯计数器值得先看。
+
+这台手机当测试台的边界（都是当场撞出来的，下一轮别重新试）：
+
+- **9333 端口不能用**：`netstat` 显示 `127.0.0.1:9333` 由**另一个 adb.exe（PID 34332）**占着
+  ⇒ `adb forward` 会「成功」但连接归别人，判据读回来的是 `timed out`。手机一律带 `CDP_PORT=9450`。
+- **`settings put` 全部被拒**（`Permission denial, must have one of: [WRITE_SECURE_SETTINGS]`）
+  ⇒ 旋转（`user_rotation`）、字号（`font_scale`）、`accelerometer_rotation` 在手机上驱动不了：
+  **横屏那半套与字号普查只能回模拟器跑**。
+- **`input` 注入被拒**（`INJECT_EVENTS`，MIUI 的「USB 调试（安全设置）」没开）⇒ 真点击只能走 CDP 的 `Input` 域。
+- **不能 `adb root`**（`adbd cannot run as root in production builds`）⇒ R206 那套拨钟判据天生只能跑模拟器。
+- **息屏时 `screenrecord` 报 `INVALID_LAYER_STACK`**，造不出手机侧的新夹具 ⇒ 夹具从 AVD 拉过来再推过去
+  （`TeslaCamReg` 21 个文件、`TeslaCamMulti` 168 个，形状一字照抄）。
+- **页面必须在最前台且可见**：`am start` 只回「brought to the front」时，如果焦点落在
+  `NotificationShade` 或别的应用（当次实测 `com.xingin.xhs` 抢过前台），`Runtime.evaluate` 会一直不答 ——
+  这是超时，不是产品缺陷。跑长判据前先确认 `mCurrentFocus`。
+- **手机一进 Doze 就整套判据停摆**（本次实测：`mWakefulness=Dozing` ⇒ `/json` 直接不答，
+  `r203-verify` / `r204-verify` 两次 300 s 超时）。而 MIUI 上**没有任何 adb 手段能把屏幕留住**：
+  `input keyevent KEYCODE_WAKEUP` 要 `INJECT_EVENTS`（被拒），`svc power stayon true` 只是当场把屏幕弄亮一下，
+  `settings get global stay_on_while_plugged_in` 回 `0` ⇒ 那个写也被 `WRITE_SECURE_SETTINGS` 挡在门外，
+  `cmd power wake` / `cmd display` 没有 wake 子命令。
+  ⇒ **手机当测试台之前，需要他在开发者选项里打开「USB 调试（安全设置）」**（打开后 `input`、`settings put`
+  都通，顺带把横屏与字号那半套也解锁）；或者把系统「屏幕超时」调到最长、跑的时候别锁屏。
+  在那之前：手机只能跑「一条命令之内起落」的短判据（`r208` 那 14 条就是在这种状态下一次跑完的）。
+- 保活试到见底了，三笔都记下来：① `svc power stayon true` 每 5 s 打一次 ⇒ `mWakefulness` 在
+  `Awake` / `Dozing` 之间**来回抖**，不是常亮；② 趁亮的那一拍让页面自己 `setKeepScreenOn(true)`
+  （产品功能，`MainActivity.kt:1466` → `FLAG_KEEP_SCREEN_ON`）**不成立** —— 唤醒后压在最上面的是
+  `NotificationShade`，`document.visibilityState` 回 `hidden`，旗子随窗口可见性一起失效，屏幕照睡；
+  ③ 到后面连「等 10 秒再回话」这一支 evaluate 都不答了（90 s 超时），而同一台机器十几分钟前
+  答完过 14 条台账判据。⇒ 闸门脚本 `devtools/phone-awaken.sh` 只当 readiness 检查用：**答话就往下跑，
+  不答就退出**，别把这台手机的状态记成产品缺陷。
+
 ## 5. 这一批为判据自己付的三条学费
 
 - **拿 `storageVolumes` 断言「点复制诊断会让台账变长」会假红**：`getStorageVolumes(false)`
@@ -16500,8 +16559,10 @@ x 前置：台账函数在这个包里（describeBridgeCost） = undefined
 **量过并 0 红的（都在交付的那一份 1.2.334 上，AVD `emulator-5554`，API 36）**：
 
 - `devtools/r208-verify.sh` 台账判据 **13 条 0 红**（§3）。这 13 条跑完之后又加了一条前置
-  「这就是刚起来的那一份页面（`performance.now() < 120 s`）」—— **这条新前置没再跑过一次**，
-  下面的环境事故把设备拿走了。下一轮补跑，补到之前它不算通过。
+  「这就是刚起来的那一份页面（`performance.now() < 120 s`）」—— 这条**当天没补上**（环境事故把设备拿走了），
+  **2026-11-01 在真机补跑，14 条 0 红**（`performance.now() = 17 555 ms`，见 §4b）。
+  注意补跑是在**测试载具**（同一工作树 + `debuggable`）上，不是交付的那一份包；两者的前端字节相同
+  （`src/script.js` 自 10:11 未动，两份构建分别在 10:22 与 14:05）。
 - `devtools/r206-verify.sh` **18 条 0 红**（R206 §4b：两处判据缺陷改完之后复测）。
 - `devtools/r204-scan-cache.sh` **5 条 0 红**（R206 §4 里那条「没能复测」的账，本轮清了）。
   它本轮才跑通的真正原因是夹具步骤后面缺一次冷启动：整棵目录被 adb 删掉重建之后，
@@ -16511,12 +16572,20 @@ x 前置：台账函数在这个包里（describeBridgeCost） = undefined
 - `devtools/r208-bridge-cost.js` 数表两拍（§4）。
 
 **没跑成的（不算通过，也不记成缺陷）**：1.2.334 的整套回归 —— `r102-verify`（竖屏 92）、
-`r207-verify` / `r207-landscape`（13 + 2）、`r173-verify`（40）、`r102-verify-landscape`（36）。
+`r207-verify` / `r207-landscape`（13 + 2）、`r173-verify`（40）、`r102-verify-landscape`（36）、
+以及 `r203-verify` / `r204-verify` / `r205-verify` 这三套批判据。
 本轮改的正是 `script.js` 的门面（台账），竖屏那一套对它最敏感，所以这一账不能含糊：
 `Activity` 确实在前台（`topResumedActivity=com.tdashcam.studio/.MainActivity`、`pidof` 有值、
 `webview_devtools_remote_<pid>` socket 也在），但 `Runtime.evaluate` 从某一次起**永远不回话** ——
 连 `1+1` 都不答，`force-stop + start` 两轮也没救回来。是这台 AVD 的 WebView 废了，不是包坏
 （同一份包在二十分钟前还答完过 r206 那 18 条）。
+
+2026-11-01 补记：手机（`e152f205`）能答 CDP 了（§4b），所以先在上面补跑了台账那一套；
+`r203-verify` / `r204-verify` 在手机上**各试两次都是 300 s 超时**，超时原因查清是手机进 Doze
+（`mWakefulness=Dozing` ⇒ `/json` 不答），不是判据里挂了 `await`。夹具已经搬过来了
+（从 AVD `pull` 再 `push`：`TeslaCamReg` 18 片、`TeslaCamMulti` 144 片；`TeslaCamR203` 18 个 0 字节、
+`TeslaCamR204` 900 个 0 字节），所以**下一次只要屏幕别锁，这两套立刻能跑**。
+模拟器那半边今天仍然是别的 agent 在用（`mCurrentFocus=com.liangqing.photos`），不去抢。
 
 设备这一轮另外添的两笔账，写在这里免得下次当成产品现象去查：
 

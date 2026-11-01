@@ -60,6 +60,13 @@ android {
             if (hasReleaseKeystore) {
                 signingConfig = signingConfigs.getByName("release")
             }
+            // 测试载具专用的一个开关，默认关。量产 release 包**不可调试**，而 Android 的 WebView 只在
+            // 应用可调试（或工程机镜像）时开 `webview_devtools_remote_<pid>` socket —— 实测：同一份
+            // release 包在 AVD 上能连 CDP，在量产机上整机只有别的 app 的 socket，我们的进程没有，
+            // 于是整套页内判据在真机上一条都跑不了。`TDASHCAM_TEST_DEBUGGABLE=1` 造出来的那一份
+            // 仍然用同一把 release keystore 签（所以 `adb install -r` 覆盖装机不丢数据），
+            // 但它不进 Releases、不给用户装：远端调试等于把页面交给任何插得上 USB 的人。
+            isDebuggable = System.getenv("TDASHCAM_TEST_DEBUGGABLE") == "1"
             isMinifyEnabled = true
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
