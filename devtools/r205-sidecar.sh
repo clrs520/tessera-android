@@ -47,4 +47,4 @@ cat > "$P" <<'EOF'
 EOF
 
 echo "== 判据"
-CDP_TIMEOUT_MS=120000 node devtools/cdp-eval.mjs --file "$(cygpath -w "$P")"
+ADB_SERIAL="$DEV" CDP_TIMEOUT_MS=120000 node devtools/cdp-eval.mjs --file "$(cygpath -w "$P")"

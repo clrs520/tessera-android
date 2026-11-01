@@ -16606,7 +16606,7 @@ x 前置：台账函数在这个包里（describeBridgeCost） = undefined
 ## 9. 真机全套回归（2026-11-01，小米 23127PN0CC / e152f205 / 测试载具 1.2.334）
 
 他打开那个开关之后，`svc power stayon usb` 落得住（`stay_on_while_plugged_in=7`）、`input` 能投、
-`settings put` 能写 ⇒ 屏幕不再睡，长判据第一次在真机上跑通。十三套合计 **298 条 0 红**：
+`settings put` 能写 ⇒ 屏幕不再睡，长判据第一次在真机上跑通。十五套合计 **307 条 0 红**：
 
 | 套件 | 条数 | 结果 | 起跑前置（都是当场补的，不是白捡） |
 |---|---|---|---|
@@ -16627,6 +16627,8 @@ x 前置：台账函数在这个包里（describeBridgeCost） = undefined
 | `r173-verify.js` 横屏 | 40 | 0 红 | 横屏视口（见下）+ `TeslaCamReg` |
 | `r207-landscape.js` | 5 | 0 红 | 同上 |
 | `r102-verify-landscape.js` | 36 | 0 红 | 同上 |
+| `r205-sidecar.sh` | 4 | 0 红 | 夹具 6 MiB 的 `event.json`（`read_sidecars` 的字节上限）：超限那份 `ok=false` + `skipped=tooBig`，正常那份照常读出城市与坐标 |
+| `r204-scan-cache.sh` | 5 | 0 红 | 真机 FUSE 上的封存索引：普通扫描照旧答缓存（`sealed=true`、`dirsCached=21`、`statSkipped=120`），`pullRefresh` 绕开它并问到盘上新增的一小时（20 → 21 个事件、`maxSeg` 1 → 60） |
 
 **横屏这一档是怎么来的（要紧，别当成物理旋转验过）**：MIUI 把 `user_rotation` 写进 `system` 与 `secure`
 两个命名空间都回 `1`、读着也是 `1`，**但 WindowManager 不理**（`dumpsys window` 仍是 `mRotation=ROTATION_0`、

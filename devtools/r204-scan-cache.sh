@@ -44,7 +44,7 @@ EOF
 }
 
 read_state() {
-  CDP_TIMEOUT_MS=120000 node devtools/cdp-eval.mjs --file "$(cygpath -w "$P")"
+  ADB_SERIAL="$DEV" CDP_TIMEOUT_MS=120000 node devtools/cdp-eval.mjs --file "$(cygpath -w "$P")"
 }
 
 echo "== 0) 把盘换成「旧结构」：RecentClips 里 20 个「一分钟一个目录」的事件"
