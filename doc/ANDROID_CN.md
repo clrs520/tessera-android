@@ -16601,10 +16601,48 @@ x 前置：台账函数在这个包里（describeBridgeCost） = undefined
 这一轮改的是桥门面，桌面侧靠「guard 先于计时」这条结构保证不受影响，手机端要的是那 92 条竖屏账 ——
 等设备能答话了把上面四套跑完再发。
 
-2026-11-01 补：手机能答话了（§4b），四套里的**台账那一套在真机补跑 14/0**，另外三套（`r203` / `r204` / `r207`）
-在这台手机上一次也没落下来 —— 卡在屏幕睡（Doze）而不是卡在判据。所以这一账仍然欠着，tag 仍然不打。
-补这笔账只差他一个动作：**开发者选项 → 「USB 调试（安全设置）」打开**（或把系统「屏幕超时」调到最长、
-跑的时候别锁屏）。夹具已经搬到手机上了，打开之后 `DEV=e152f205 CDP_PORT=9450` 直接能跑。
+2026-11-01 补（同一天，他把「USB 调试（安全设置）」打开之后）：**这一账结清了，见 §9**。
+
+## 9. 真机全套回归（2026-11-01，小米 23127PN0CC / e152f205 / 测试载具 1.2.334）
+
+他打开那个开关之后，`svc power stayon usb` 落得住（`stay_on_while_plugged_in=7`）、`input` 能投、
+`settings put` 能写 ⇒ 屏幕不再睡，长判据第一次在真机上跑通。十三套合计 **298 条 0 红**：
+
+| 套件 | 条数 | 结果 | 起跑前置（都是当场补的，不是白捡） |
+|---|---|---|---|
+| `r208-verify.js` 台账 | 14 | 0 红 | 冷启动（runner 自带） |
+| `r203-verify.js` 第 1 批 | 12 | 0 红 | 夹具 `/sdcard/TeslaCamR203`（18 个 0 字节） |
+| `r204-verify.js` 第 2 批 | 9 | 0 红 | 夹具 `/sdcard/TeslaCamR204`（900 个 0 字节，平铺一个目录） |
+| `r205-verify.js` 第 3 批 | 10 | 0 红 | `TeslaCamReg` + `TeslaCamMulti`（从 AVD `pull`→`push`，连 `event.json` 一起） |
+| `r201-dragselect.js` | 11 | 0 红 | `TeslaCamMulti` |
+| `r186-batch-delete.js` | 17 | 0 红 | `TeslaCamR182` + `TeslaCamScroll` |
+| `r185-scroll-chip.js` | 5 | 0 红 | `TeslaCamScroll` |
+| `r182-note.js` | 24 | 0 红 | **先把当前目录切成 `TeslaCamR182`** —— 这套不自己装载，
+  上一轮它在手机上直接抛 `Cannot read properties of undefined (reading 'eventId')`：
+  `recent` 来自「此刻屏幕上已扫出的列表」，而 runner 冷启动后停在别的目录。
+  补一步 `loadTauriDirectory('/sdcard/TeslaCamR182')` 就 24/0。⇒ 这类「拿别人的现场当自己的前置」的判据，
+  **要么自己造前置，要么 runner 替它造，不然红/崩都被记成产品问题**。 |
+| `r102-verify.js` 竖屏全量 | 93 | 0 红 | 装载 `TeslaCamReg`（3 个事件，真片解得动） |
+| `r207-verify.js` 可达性 | 22 | 0 红 | 冷启动 |
+| `r173-verify.js` 横屏 | 40 | 0 红 | 横屏视口（见下）+ `TeslaCamReg` |
+| `r207-landscape.js` | 5 | 0 红 | 同上 |
+| `r102-verify-landscape.js` | 36 | 0 红 | 同上 |
+
+**横屏这一档是怎么来的（要紧，别当成物理旋转验过）**：MIUI 把 `user_rotation` 写进 `system` 与 `secure`
+两个命名空间都回 `1`、读着也是 `1`，**但 WindowManager 不理**（`dumpsys window` 仍是 `mRotation=ROTATION_0`、
+`… w400dp h890dp … port`），它自己那套方向锁在别处（`dumpsys window` 里看得见 `MiuiRotationLockHistory`、
+`settings` 里有空的 `device_state_rotation_lock`）。改走显示尺寸覆盖：`cmd window size 2670x1200`
+⇒ CSS 视口 `890x400`（dpr 仍是 3），三套横屏判据都在这一档跑通，跑完 `cmd window size reset` 还原
+（收尾读数 `Physical size: 1200x2670`）。所以这三套验的是**横屏栅格与几何**，不是
+「手把手机转过去那一下的过渡」—— 后者仍然是 AVD 的 `user_rotation` 那套在管（R182 §方向）。
+判据自己在这一点上是干净的：横屏没落地时它们**直接明确失败**
+（`r207-landscape` 回 `{"fatal":"没转到横屏"}`、`r102-verify-landscape` 抛 `rotation did not land: still 400x890`），
+没有拿竖屏白捡通过。
+
+两份包的边界（验收账挂在谁头上）：这 298 条跑在**测试载具**上。交付给用户的那一份（不可调试）
+前端字节与它相同（`src/script.js` 自 10:11 未动，两份构建 10:22 / 14:05），
+而上一轮 1.2.334 的**那一份**在 AVD 上过 `r206-verify` 18/0 与 `r204-scan-cache` 5/0。
+⇒ **v1.2.334 现在打 tag、发 Release**，发的是 `Tessera-1.2.334.apk`（不可调试那一份）。
 
 ## 8. 交出去的东西（两份包，前端字节相同）
 
