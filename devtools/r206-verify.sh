@@ -14,7 +14,7 @@
 #   另加两条不回归：导出期间服务真的有前台身份；中途拨了钟这一单仍然成功产出。
 # 改前（1.2.330）必须红，改后必须绿。设备侧动作（拨钟 / 停服务 / 杀进程）都在本脚本里，页内只负责
 # 起作业与采样，所以每一步都能重跑。
-# 素材：/sdcard/TeslaCamR206 —— 4 路 × 15 s 的 **screenrecord 真片**（脚本自己录，约 70 s；已有就跳过）。
+# 素材：/sdcard/TeslaCamR206 —— 4 路 × 15 s 的真片（**主机侧 ffmpeg 造**，约 10 s；已有就跳过）。
 # 3 s 的短片 10 s 就编完，量不到「中途」；0 字节的 touch 夹具解不动，导出会被整批判「全黑」（R180）。
 # 判据里的值一律经 $TMP/r206-values 传给 node：`VAR=值 node` 这种写法会被 MSYS 把 `/storage/...`
 # 改写成 `<git 安装目录>/storage/...`（本轮实测踩过），文件内容才不动。
@@ -22,6 +22,14 @@ set -o pipefail
 cd "$(dirname "$0")/.." || exit 1
 ADB="${ADB:-C:/Users/Xingcong/AppData/Local/Android/Sdk/platform-tools/adb.exe}"
 DEV="${DEV:-emulator-5554}"
+# 夹具改成主机侧 ffmpeg 生成（原先靠设备 `screenrecord`，MIUI 息屏会报 INVALID_LAYER_STACK，
+# 而且只能录出竖片）。解析顺序：显式 $FFMPEG → PATH 里的 ffmpeg → 本机装好的那一份。
+if [ -z "${FFMPEG:-}" ]; then
+  FFMPEG="$(command -v ffmpeg 2>/dev/null || true)"
+fi
+if [ -z "${FFMPEG:-}" ] && [ -x "/c/Users/Xingcong/AppData/Local/Programs/ffmpeg/bin/ffmpeg.exe" ]; then
+  FFMPEG="/c/Users/Xingcong/AppData/Local/Programs/ffmpeg/bin/ffmpeg.exe"
+fi
 TMP=/c/Users/Xingcong/AppData/Local/Temp
 # 每个进程一套临时文件。上一轮踩过：改脚本时前一轮还在跑（bash 边读边执行，直接语法错在半路），
 # 两轮共用 `$TMP/r206-probe.js` ⇒ 一份被另一轮写歪的 JS 喂进 WebView，症状是 SyntaxError: await
@@ -30,7 +38,8 @@ P="$TMP/r206-probe-$$"
 R="$TMP/r206-assert-$$"
 VALS="$TMP/r206-values-$$"
 KCNT="$TMP/r206-kills-$$"
-trap 'rm -f "$P" "$R" "$VALS" "$KCNT"' EXIT
+CLIPS="$TMP/r206-clips-$$"
+trap 'rm -rf "$CLIPS"; rm -f "$P" "$R" "$VALS" "$KCNT"' EXIT
 # 同一台设备不允许两个夹具在跑（拨钟 / 停服务 / 杀进程互相抢前台，测出来的全是假数）。
 # 本机没有 pgrep，所以用 `mkdir` 的原子性做锁；一轮跑满约 12 分钟，留 40 分钟当僵尸锁的宽限。
 LOCK="$TMP/r206.lock"
@@ -43,7 +52,7 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   echo "   锁已经 $((AGE / 60)) 分钟没动，按僵尸锁接管" >&2
   rm -rf "$LOCK"; mkdir "$LOCK" || exit 1
 fi
-trap 'rm -rf "$LOCK"; rm -f "$P" "$R" "$VALS" "$KCNT"' EXIT
+trap 'rm -rf "$LOCK"; rm -rf "$CLIPS"; rm -f "$P" "$R" "$VALS" "$KCNT"' EXIT
 PKG=com.tdashcam.studio
 # `am stopservice` 的位置参数会被包成 MAIN/LAUNCHER intent（本轮实测 logcat：
 # `Intent { act=android.intent.action.MAIN cat=[...LAUNCHER] cmp=com.tdashcam.studio/.ExportService }`
@@ -131,20 +140,36 @@ START_JS='
 
 all_cams() { printf '%s' "${START_JS/__CAMERAS__/v.phoneExportCameras().slice(0, 6)}"; }
 
-echo "== 0a) 夹具：一份 15 秒 × 4 路的**真片**事件（没有就现录，录一次约 70 s）"
+echo "== 0a) 夹具：一份 15 秒 × 4 路的**真片**事件（没有就现造，主机侧 ffmpeg 约 10 s）"
 HAVE="$(adb_run "ls -1 $FIX/SavedClips/*/ 2>/dev/null | grep -c '\.mp4$'")"
 if [ "${HAVE:-0}" -lt 4 ]; then
+  if [ -z "${FFMPEG:-}" ]; then
+    # 原先这里是设备侧 `screenrecord --time-limit 15`：MIUI 息屏报 INVALID_LAYER_STACK、
+    # 录出来还是竖片。现在改成主机侧生成，找不到 ffmpeg 就明确停下，不要拿别的凑。
+    echo "!! 找不到 ffmpeg（原先是设备侧 screenrecord 现录）。装法见 memory 的「Windows dev toolchain」，" >&2
+    echo "   或用 FFMPEG=<ffmpeg 路径> $0 指定。" >&2
+    exit 1
+  fi
   E="$FIX/SavedClips/2026-10-31_10-00-00"
+  rm -rf "$CLIPS"; mkdir -p "$CLIPS"
   adb_run "rm -rf $FIX; mkdir -p $E"
   for cam in front back left_repeater right_repeater; do
-    # screenrecord 是本机没有 ffmpeg 时唯一的真片来源（R180 起就用它）；录出来的文件有 moov，
-    # 0 字节的 touch 夹具解不动，导出会整批被判「全黑」。
-    adb_run "screenrecord --time-limit 15 --bit-rate 6000000 $E/2026-10-31_10-00-00-$cam.mp4"
+    # 15 s / 1280x576（真机横片比例）/ 30 fps / 画面在动（testsrc2）—— 导出与计帧都要真帧：
+    # 0 字节的 touch 夹具解不动，导出会整批判「全黑」（R180）；纯色静态片又看不出帧在走。
+    "$FFMPEG" -hide_banner -loglevel error -y \
+      -f lavfi -i "testsrc2=size=1280x576:rate=30:duration=15" \
+      -f lavfi -i "anullsrc=r=48000:cl=mono" \
+      -shortest -c:v libx264 -preset veryfast -pix_fmt yuv420p -g 30 \
+      -c:a aac -b:a 64k -movflags +faststart \
+      "$(cygpath -w "$CLIPS/2026-10-31_10-00-00-$cam.mp4")" || { echo "!! ffmpeg 生成失败（$cam）" >&2; exit 1; }
+    MSYS_NO_PATHCONV=1 "$ADB" -s "$DEV" push \
+      "$(cygpath -w "$CLIPS/2026-10-31_10-00-00-$cam.mp4")" "$E/" >/dev/null \
+      || { echo "!! 推不到设备（$cam）" >&2; exit 1; }
   done
   adb_run "sync"
-  echo "   录好了：$(adb_run "ls -l $E | awk '{print \$5, \$9}' | tr '\n' ' '")"
+  echo "   造好了：$(adb_run "ls -l $E | awk '{print \$5, \$9}' | tr '\n' ' '")"
 else
-  echo "   已有 $HAVE 个文件，跳过录制"
+  echo "   已有 $HAVE 个文件，跳过生成"
 fi
 
 echo "== 0b) 前置：APP 在前台、真片解得动、取到一帧（ThumbFetcher 的线程得先生出来）"

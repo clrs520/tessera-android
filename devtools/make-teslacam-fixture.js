@@ -23,14 +23,48 @@ const PLACEHOLDER = Buffer.concat([
     Buffer.alloc(64 * 1024, 0x21),
 ]);
 
+// Resolve ffmpeg the way the shell runners do: explicit FFMPEG, then PATH, then the copy
+// this machine installed under %LOCALAPPDATA%. Null when there is none.
+function findFfmpeg() {
+    if (process.env.FFMPEG) return process.env.FFMPEG;
+    const exe = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+    for (const dir of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
+        const cand = path.join(dir, exe);
+        if (fs.existsSync(cand)) return cand;
+    }
+    const local = process.env.LOCALAPPDATA
+        ? path.join(process.env.LOCALAPPDATA, 'Programs', 'ffmpeg', 'bin', exe)
+        : '';
+    return local && fs.existsSync(local) ? local : null;
+}
+
 // The placeholder has no decodable frames, so anything gated on playback (control
-// auto-hide, timeline, audio) needs a real clip. Record one with
-// `adb shell screenrecord --time-limit 6 /data/local/tmp/base.mp4` and pull it to
-// devtools/clip-real.mp4; without it the fixture stays header-only.
+// auto-hide, timeline, audio) needs a real clip. devtools/clip-real.mp4 wins when it is
+// there; otherwise one is generated with ffmpeg into the scratch dir next to the fixture.
+// (No more `adb shell screenrecord`: MIUI refuses it while the screen sleeps, and what it
+// records is a portrait phone, not a 1280x576 dashcam frame.) Only with neither do we fall
+// back to the header-only placeholder.
 const VIDEO = (() => {
     try {
         return fs.readFileSync(path.join(__dirname, 'clip-real.mp4'));
+    } catch (e) { /* fall through to ffmpeg */ }
+    const ffmpeg = findFfmpeg();
+    if (!ffmpeg) return PLACEHOLDER;
+    const clip = path.join(path.dirname(OUT), '_clip.mp4');
+    try {
+        if (fs.existsSync(clip)) return fs.readFileSync(clip);
+        fs.mkdirSync(path.dirname(clip), { recursive: true });
+        execFileSync(ffmpeg, [
+            '-hide_banner', '-loglevel', 'error', '-y',
+            '-f', 'lavfi', '-i', 'testsrc2=size=1280x576:rate=30:duration=6',
+            '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=mono',
+            '-shortest', '-c:v', 'libx264', '-preset', 'veryfast',
+            '-pix_fmt', 'yuv420p', '-g', '30', '-c:a', 'aac', '-b:a', '64k',
+            '-movflags', '+faststart', clip,
+        ]);
+        return fs.readFileSync(clip);
     } catch (e) {
+        console.warn('   ffmpeg 造片失败，退回 header-only 夹具：' + e.message);
         return PLACEHOLDER;
     }
 })();

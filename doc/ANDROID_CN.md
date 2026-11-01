@@ -16516,6 +16516,9 @@ x 前置：台账函数在这个包里（describeBridgeCost） = undefined
 - **不能 `adb root`**（`adbd cannot run as root in production builds`）⇒ R206 那套拨钟判据天生只能跑模拟器。
 - **息屏时 `screenrecord` 报 `INVALID_LAYER_STACK`**，造不出手机侧的新夹具 ⇒ 夹具从 AVD 拉过来再推过去
   （`TeslaCamReg` 21 个文件、`TeslaCamMulti` 168 个，形状一字照抄）。
+  后面装了 ffmpeg 之后这条限制已经解掉：`r206-verify.sh` 与 `make-teslacam-fixture.js` 改成**主机侧生成**
+  （`testsrc2` 1280x576 + 静音 aac，画面在动），再 `adb push` 过去；两边都留了显式 `FFMPEG` 环境变量与
+  找不到就明确失败的出口。
 - **页面必须在最前台且可见**：`am start` 只回「brought to the front」时，如果焦点落在
   `NotificationShade` 或别的应用（当次实测 `com.xingin.xhs` 抢过前台），`Runtime.evaluate` 会一直不答 ——
   这是超时，不是产品缺陷。跑长判据前先确认 `mCurrentFocus`。
