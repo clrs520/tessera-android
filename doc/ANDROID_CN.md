@@ -16309,3 +16309,68 @@ aria-selected 只挂在有 role 的元素上 = 3 张没有 role（video-card sel
 | U4 | `styles.css:9077`（手势提示关闭） | 30×30，低于本项目的 40dp 下限。图标视觉不变，靠 `min-width/min-height: 40` + `background-clip: content-box` 把命中区抬上去 |
 | U5 | `styles.css:6662`（`#exportPill`） | 胶囊 `height: 34px` —— 它是「导出在跑」唯一的屏内入口。加高到 40（底部锚定，往上长，不压进度条那一层） |
 | U6 | `styles.css:10277`（`#androidDirModal .modal-content`） | 目录浏览器完全不参与 `--kb-h`：键盘弹起来时底下几行被盖住，而同一批 iOS 抽屉（筛选面等）都会按键盘高度上抬。**留白和封顶要一起改**：第一版只加 `margin-bottom`，而 `max-height` 那条同特异度的 `html.sheet-mode` 规则（更靠后）本来就把上一版的 `max-height:none` 盖成了死码，于是键盘一抬，805px 高的整块被顶到屏幕上缘之外（实测顶边 64 → −256，标题与「上一级」跑掉）。现在选择器写成 `.sheet-mode.touch-ui`（特异度高一级），留白 `12+--kb-h`、封顶 `视口−34−安全区−键盘高`；改后读数见 §3（键盘 320px 时底边上抬、顶边仍在屏内、盒高随可用高自动收窄）。 |
+
+## 3. 验收（1.2.333，md5 `f9f1271e409e45605caa1f76f3d11063`，28 543 891 字节）
+
+`bash devtools/r207-verify.sh` → **竖屏 22/0、横屏 5/0**（合计 27 条，0 红）。逐条读数：
+
+| 面 | 浅色 | 深色 |
+|---|---|---|
+| 长按菜单项（`.context-item[disabled]`） | 4.77:1 | 5.94:1 |
+| 导出页主按钮（`.pe-nav-go[disabled]`，不透明禁用底） | 3.86:1 | 4.03:1 |
+| 批量删除（`.batch-delete-btn:disabled`，不透明禁用底） | 3.86:1 | 4.03:1 |
+| 横屏筛选面「重置」（`.filter-sheet-action[disabled]`） | 4.77:1 | 5.43:1 |
+
+其余三条：`aria-selected` 挂在有 role 的元素上 = **0 张没有**（改前 3 张）；弹层开着时
+`.main-content` / `#metaDetailOverlay` / `#exportPill` 三个 `inert` 全 = true；命中区
+导出页返回 54×40、手势提示关闭 40×40、横屏「重置」40×40。
+**导出胶囊这条走的是真那颗**：判据自己起一单（`playEvent` 不 await，改轮询 `currentEvent`），
+再把导出页收起（页面开着时胶囊被压在下面，`checkVisibility` 实测 false），量到 **100×40**；
+量完取消。目录浏览器：`--kb-h=max(320px, 0.0px)`、底边 **869 → 549（抬 320）**、
+顶边 **64**（改前同一支判据读到 −256）、盒高随可用高从 805 收到 **485**。
+
+回归（**每个套件前冷启动一次**，`bash devtools/r207-regression.sh`；上一轮不重启连着跑时
+`r102-verify` 白捡了 4 条 R118 的红 —— 抽屉里那一行没开起来，是判据互相留脏状态）：
+
+```
+r102-verify 93/0   r102-verify-landscape 36/0   r173-verify 40/0   r182-note 24/0
+r203-verify 12/0   r204-verify 9/0   r205-verify 10/0   r201-dragselect 11/0
+r186-batch-delete 17/0   r185-scroll-chip 5/0            合计 257/0
+```
+
+目视截图 9 张（`bash devtools/r207-shots.sh`，`%TEMP%/r207-shots/`）：长按菜单浅/深、导出页主按钮浅/深、
+批量删除浅/深、目录浏览器 + 320px 键盘、导出中胶囊、横屏筛选面。四张逐张看过：禁用行读得清、
+图标跟着一起换墨、键盘抬起时标题与「上一级」仍在屏内、横屏「重置」与「收起」同高差一档色而不是「淡掉一半」。
+
+**没重跑的**：`r206-verify.sh`（17 条，真导出 + 杀进程链；本轮没有原生改动）、`r205-sidecar.sh`（4）、
+`r204-scan-cache.sh`（5）。`r138-verify-fixes.js` 只报读数不给 ok/fail，本轮读数
+`held=[] need=null resumeCleared=true at=2/3.03`，形状正常。
+
+本轮新踩的假信号（都记在判据注释里）：
+- `cs(btn.color)` —— `btn.color` 是 <button> 上没有的属性，传进 `getComputedStyle` 直接抛，
+  整份横屏判据变成一条 `threw`（计算值要从元素上取：`cs(btn).color`）。
+- 「禁用 ≠ 启用」拿 `disabled = before` 当启用态：这两颗钮本来就禁着，两边读到同一个色，红在判据自己头上。
+- 「顶边在不在屏内」在清掉键盘高之后才量：那条面带 transition，200 ms 读到的是复原途中，把 −256 读成 64。
+- 探针借来的前置要自己收尾：第 1 节开过长按菜单，`body.context-open` 会把胶囊整条 `display:none`
+  （styles.css:6698），于是「有作业在跑」的胶囊只能退到样式盒。
+- 截图脚本连着摆多个面时，每一面开头要先把上一面收掉，否则拍到的是导出页（`kbdir` 第一版就是这么拍的）。
+- `show()` 里把 `'$1'` 直接插进 `node -e` 的字符串：MSYS 会把 `/c/...` 改写成 `C:\c\...`，
+  报 ENOENT 而不是读不到结果 —— 一律走 `process.argv` + `cygpath -w`。
+- `r102-verify-landscape` 的基准要求「不是 RecentClips 的事件」，而 `r204` 会把目录切到
+  `TeslaCamR204`（全 0 字节）：切回 `TeslaCamReg` 也不够，还要**冷启动**让判据自己播非 RecentClips 那一条，
+  否则 5 条连红全是假信号。
+
+## 4. 余账
+
+- 禁用态这一族 WCAG 豁免，本项目自定 ≥3:1；最低的一档是「不透明禁用底 + 灰墨」= 3.86:1（浅色）。
+  真机上若还要更保守，只动 `--ink-disabled` / `--fill-disabled` 这一对 token，别再回到 `opacity`。
+- 竖屏那一面的 `#filterResetBtn` 实测 0×0 / `checkVisibility=false`（整条规则在横屏那条 @media 里），
+  所以竖屏判据不再量它，改由横屏半边量。将来若竖屏也要画这一对钮，得另加一条规则并补判据。
+- `--kb-h` 这条通道只给了竖屏 sheet-mode 的目录浏览器；横屏那一面是居中卡片，本轮没动，
+  键盘在横屏盖住它的路径仍未验（R71 那轮只处理过导出/筛选面）。
+- `syncSheetFocus` 的 inert 名单是**手写清单**：以后新增挂在 body 上的浮面，要一起加进去，
+  否则「弹层开着时焦点跑进去」这一类会原样复发。
+- `.pe-tile-grip`（导出画格搬运柄）这一轮仍没走到：它只在「摆放编辑」面里画，AVD 上要把那一面开到
+  能量的状态需要真素材 + 预览帧，判据把它记成 `notes` 而不是绿。
+- 1.2.332 是本轮内的中间包（未发布、同名覆盖过一次），最终交付并打 tag 的是 **1.2.333**。
+- R206 §5 那几条仍挂着：FUSE sync 桥、`.part` 无人回收、`darkSome` 与 `cancelledKept` 的措辞。
