@@ -54,8 +54,14 @@
     ok('时间轴总时长 = 各段实测之和（差 < 1 s）', Math.abs(total - sum) < 1,
         `total=${total} sum=${ev.sumSec} segments=${segs}`);
 
-    try { await v.showClipModal(); } catch (e) { /* 打不开也算读数 */ }
-    await sleep(1800);
+    // 走产品自己的入口（#clipBtn = 剪辑按钮），并且**等到 `.show` 落地且读数不再是占位符**。
+    // R143 的教训：`await showXxx()` 不保证面板已经铺开，动画里问问题必然读到 `--:--:--`。
+    try { document.getElementById('clipBtn')?.click(); } catch (e) { /* 下面按读数判 */ }
+    for (let i = 0; i < 40; i += 1) {
+        await sleep(250);
+        const t = txt('#clipStartTime');
+        if (t && !/^--/.test(t)) break;
+    }
     const startTxt = txt('#clipStartTime'), endTxt = txt('#clipEndTime'), durTxt = txt('#clipDuration');
     const sh = document.querySelector('#clipStartHandle'), eh = document.querySelector('#clipEndHandle');
     const sR = sh ? rect(sh) : null, eR = eh ? rect(eh) : null;
@@ -76,21 +82,26 @@
     const mcp = v.multiCameraPlayer;
     try { mcp.setLayout('grid'); } catch (e) { /* 已经在 grid 就算了 */ }
     await sleep(2500);
+    // 「不拉伸」的正确判据是 **图片怎么摆进这个元素框**，不是元素框本身的比例：
+    // 元素框 187×104（1.80）里放 1.544 的画面，用 contain 就是上下留白（16 % 留白，不是拉伸），
+    // 用 fill 才是压扁。所以看 object-fit，并把留白比例当作读数记下来。
     const cells = [];
     for (const cam of Object.keys(mcp.players || {})) {
         const el = mcp.players[cam];
         if (!el || !el.videoWidth) continue;
         const box = rect(el);
         if (box.w < 8 || box.h < 8) continue;
+        const fit = getComputedStyle(el).objectFit || 'contain';
         const want = el.videoWidth / el.videoHeight;
+        const bar = box.w / box.h > want ? 1 - want / (box.w / box.h) : 1 - (box.w / box.h) / want;
         cells.push({ cam, vw: el.videoWidth, vh: el.videoHeight,
-            box: `${Math.round(box.w)}x${Math.round(box.h)}`,
-            aspectErr: +(((box.w / box.h) / want - 1) * 100).toFixed(2) });
+            box: `${Math.round(box.w)}x${Math.round(box.h)}`, fit,
+            letterboxPct: +(bar * 100).toFixed(1) });
     }
     ok('前置：六宫格里至少两路带画面', cells.length >= 2, `cells=${cells.length}`);
-    ok('每一路都不被拉伸（显示比例与固有比例差 ≤ 1 %）',
-        cells.length >= 2 && cells.every(c => Math.abs(c.aspectErr) <= 1),
-        cells.map(c => `${c.cam} ${c.vw}x${c.vh}→${c.box} ${c.aspectErr}%`).join(' | '));
+    ok('每一路都不被拉伸（object-fit 是 contain/cover，不是 fill）',
+        cells.length >= 2 && cells.every(c => c.fit !== 'fill'),
+        cells.map(c => `${c.cam} ${c.vw}x${c.vh}→${c.box} fit=${c.fit} 留白 ${c.letterboxPct}%`).join(' | '));
     ok('确实是混分辨率（否则这条没测到真形状）',
         new Set(cells.map(c => c.vw + 'x' + c.vh)).size >= 2,
         [...new Set(cells.map(c => c.vw + 'x' + c.vh))].join(','));

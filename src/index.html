@@ -432,7 +432,7 @@
                             <span class="btn-text" data-i18n="toggleLanguage">语言</span>
                         </button>
                         <button id="cleanPartsBtn" class="control-btn phone-only-btn" title="清理未完成导出">
-                            <span class="btn-icon">🧹</span>
+                            <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M4 7h16M9.5 7V5h5v2M6.5 7l1 12h9l1-12M10 11v4.5M14 11v4.5"/></svg></span>
                             <span class="btn-text" data-i18n="cleanParts">清理残片</span>
                         </button>
                         <button id="aboutBtn" class="control-btn phone-only-btn" title="关于">
@@ -1142,6 +1142,7 @@
          while their layer owns the screen (see syncTabSelection), which is visible on the ⋮ panel
          and, for ~200ms, on the drawer as the bar fades. -->
     <nav id="phoneActionBar" class="phone-action-bar" aria-label="主操作" data-i18n-aria="ariaMainActions">
+        <span id="tabLens" class="tab-lens" aria-hidden="true"></span>
         <button type="button" id="tabListBtn" class="tab-btn" aria-label="片段" data-action="list">
             <span class="tab-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 5v14M16 5v14M4 9.5h4M4 14.5h4M16 9.5h4M16 14.5h4"/></svg></span>
             <span class="tab-label" data-i18n="tabClips">片段</span>

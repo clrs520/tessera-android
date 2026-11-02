@@ -24384,6 +24384,20 @@ class TeslaCamViewer {
             if (on) btn.setAttribute('aria-current', 'true');
             else btn.removeAttribute('aria-current');
         });
+        // A+C：同一枚胶囊滑到亮着的那一格。位置按真实 offset 写（栏两侧 padding 与格间 gap
+        // 会让百分比算式差 1~2 px），两层都落下时淡出 —— R58 那句「没有第三态」的语义不变。
+        const lens = document.getElementById('tabLens');
+        if (lens) {
+            const lit = Object.entries(states).find(([id, on]) => on && this.dom[id]?.offsetWidth);
+            if (lit) {
+                const btn = this.dom[lit[0]];
+                lens.style.width = `${btn.offsetWidth}px`;
+                lens.style.transform = `translateX(${btn.offsetLeft}px)`;
+                lens.classList.add('show');
+            } else {
+                lens.classList.remove('show');
+            }
+        }
     }
 
     initSwipeGestures() {

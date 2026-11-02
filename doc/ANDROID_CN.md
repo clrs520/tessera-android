@@ -16889,3 +16889,57 @@ R212 结束时我记了一条「设置面板行高 39.2，比 ≥40 少 1px」�
 
 **判据坑（记进 memory）**：① 量触摸目标必须在面板**打开且动画结束**之后；
 ② 状态注入只能读**固有尺寸**，同一份读数里的布局值（宽/位置）不可信 —— 注入态不是真实布局。
+
+# R214 —— 底栏选中态换成「一枚会滑动的胶囊」+ 设置面板里那条整行
+
+## 1. `--safe-bottom`：核实后**不需要改**（撤回我自己的指控）
+
+上一轮我说「胶囊离底 10 px 是写死的、有 Gesture Bar 的机型会压上去」。查清后撤回：
+
+- `styles.css:6601` 是 `bottom: calc(10px + var(--safe-bottom))`，第 5 行是 `--safe-bottom: env(safe-area-inset-bottom)`；
+- 读到 `env()` = 0 是因为沉浸式下 WebView 本来就没有底部安全区，不是 token 没生效。
+
+⇒ 这条不是缺陷，不动。
+
+## 2. 选中态：从「每格各自平铺一块」改成「同一枚胶囊滑过去」
+
+改前：`.tab-btn.on { background-color: var(--glass-tint-soft); }` —— 切页时是**瞬间**换一块。
+
+改后：
+- `.tab-btn` 各自 `position: relative; z-index: 1`（透镜是绝对定位，不抬格会盖住图标/文字）；
+- 栏里新增 `<span id="tabLens" class="tab-lens" aria-hidden="true">`，`pointer-events: none`；
+- `.tab-btn.on` 只留 `opacity/color`，背景交给透镜；
+- `syncTabSelection()` 按**真实布局值**写 `width = btn.offsetWidth`、`transform = translateX(btn.offsetLeft)`（栏两侧 padding 与格间 gap 会让百分比算式差 1~2 px）；
+- `transform/width` 过渡 0.22 s `cubic-bezier(.32,.72,0,1)`；`prefers-reduced-motion` 下只留 0.12 s 淡入淡出；
+- 两层都落下（抽屉与 ⋮ 面板都关）时加不上 `.on` ⇒ 透镜 `opacity:0`，R58「没有第三态」的语义不变。
+
+真机实测（1200×2670，CSS 视口 400）：
+```
+抽屉开 ：lens=20,842 119×46   btn(片段)=20,842 119×46   opacity=1
+面板开 ：lens=261,828 119     btn(设置)=261,828 119     Δleft=241
+两层关 ：opacity=0
+标签中心命中：SPAN.tab-label（不是透镜）
+```
+
+## 3. 设置面板：「清理残片」不再是半格独行
+
+2 栏栅格里它插在「亮度 / 语言」那一行之后、「关于」之前，只剩半格。它是维护动作、不与旁边成对 ⇒
+`html.touch-ui .header-collapsed .header-actions-group #cleanPartsBtn { grid-column: 1 / -1; }`，
+与「主题」「关于」两行同一形态。
+
+实测（面板开、竖屏）：`clean=356 about=356 panel=368`，整块里 18 行，无「单格且不足 90% 宽」的行。
+
+图标也从 🧹 emoji 换成与组里同一套的线性垃圾桶 SVG（`fill:none`、`stroke:currentColor`、1.7 px；
+面板收起态这一档是 17 px，与「关于 / 刷新列表 / 手势说明」实测一致）。
+
+## 4. 判据
+
+`devtools/r214-lens.js` **9/9**、`devtools/r214-settings.js` **5/5**。
+
+两条判据各踩过一个坑，都改的是判据不是产品：
+- 竖屏抽屉（sheet）**整片盖住底栏**，在抽屉打开那一档问「标签中心命中谁」必然命中抽屉底部的「选择文件夹」。
+  命中测试挪到底栏真正露出来的那一档（⋮ 面板开、透镜在「设置」上）。
+- 面板展开时整块进 `.header-collapsed`，这一档图标是 **17 px**（21 px 是面板外的一档）。
+  「同一套」应拿隔壁行当基准比，不能钉死 21。
+
+竖屏截图（面板开）同时看到：整行的「清理残片」、以及底栏透镜正落在「设置」那一格。

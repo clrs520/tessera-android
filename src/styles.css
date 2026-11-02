@@ -1599,6 +1599,13 @@ body.dark-theme #eventFilter {
         grid-column: 1 / -1;
     }
 
+    /* R214 —— 「清理残片」插在 语言/亮度 那一行之后、关于 之前，2 栏栅格里只剩它半格，
+       看着像漏了一项。它是维护动作，不是与旁边那条成对的开关 ⇒ 给它整行，
+       与「主题切换」「关于」两行整行同一形态（用户原话：「单独一行的，不美观」）。 */
+    html.touch-ui .header-collapsed .header-actions-group #cleanPartsBtn {
+        grid-column: 1 / -1;
+    }
+
     /* The strip lives 10 px above the top of the control band it is inside, so clearing the band by
         `--meta-bottom` leaves the card's hem 4 px over the frames. 6 px more is the whole fix for
      * that; the old lift by the strip's full height was the thing driving the card into the picture.
@@ -6613,7 +6620,41 @@ html.touch-ui .filter-type-group .choice-segment {
     .tab-btn.on {
         opacity: 1;
         color: var(--glass-tint);
+    }
+
+    /* A+C：选中不再各自平铺一层 --glass-tint-soft，而是**同一枚**胶囊滑到被选中的那一格。
+       位置与宽度由 syncTabSelection() 按真实 offsetLeft/offsetWidth 写死（不靠百分比算，
+       因为栏两侧 padding 与格间 gap 会让 `(100%-10px-4px)/3` 这类式子跟真实布局差 1~2px）。 */
+    /* 透镜是绝对定位元素，按绘制顺序会盖在文字与图标之上 ⇒ 三格各自抬一层。 */
+    .tab-btn {
+        position: relative;
+        z-index: 1;
+    }
+
+    .tab-lens {
+        position: absolute;
+        top: 5px;
+        bottom: 5px;
+        left: 0;
+        width: 0;
+        border-radius: var(--r-pill);
         background-color: var(--glass-tint-soft);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+        opacity: 0;
+        pointer-events: none;
+        transition: transform 0.22s cubic-bezier(0.32, 0.72, 0, 1),
+                    width 0.22s cubic-bezier(0.32, 0.72, 0, 1),
+                    opacity 0.16s ease;
+    }
+
+    .tab-lens.show {
+        opacity: 1;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .tab-lens {
+            transition: opacity 0.12s ease;
+        }
     }
 
     .tab-icon {
