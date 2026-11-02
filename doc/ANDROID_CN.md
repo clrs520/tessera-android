@@ -16832,3 +16832,42 @@ R206 留的那笔「`.part` 永不回收」按丙案落地：**不自动删**，
   `appops get … MANAGE_EXTERNAL_STORAGE` 仍是 `Uid mode: allow`（不是权限掉了）。
 
 诊断小账（`markBoot('list')` 只记一次、`batches=0` 印成失败）本轮**没做**，仍在账上。
+
+# R213 —— 诊断口径两处（不需要那块盘）
+
+## 1. `boot` 行：第一次的 `list=` 对大盘毫无意义
+
+`markBoot` 是「只记第一次」的（`if (bootMarks[name] !== undefined) return`），于是 `boot list=` 记的是
+**第一次出现列表那一拍** —— 大盘上那通常只有几条，读起来完全误导。新加 `markBootLatest()`（每次都覆盖），
+列表渲染处同时记一条 `listLast`。真机这次读数是：
+
+```
+boot ready=1001 list=19511:6 listLast=85066:7 | fp=392 fcp=392 dcl=1012 load=1051
+```
+
+第一次 6 条 / 最近一次 7 条 —— 只看前者会把「19.5 s 才有列表」错读成大盘的开屏耗时。
+
+## 2. 下拉刷新那条路不再印「像失败」的数
+
+`keepList` 为真时不流式（列表已是完整的，R188 的决定），所以 `streamBatches=0`、
+`sidecarMs/processMs` 没记账。以前诊断照印 `batches=0` 与 `sidecar=-ms`，读起来像流式坏了、侧车失败。
+现在：
+
+```
+scan stream n/a（下拉刷新不流式，列表已是完整的）
+scan last … sidecar=n/a process=n/a（这一路不记账）
+```
+
+`nativeScanFiles` 里新增 `streamTried`（= 这次是否允许流式），诊断按它选措辞 —— 不是按 `batches===0` 猜。
+
+## 3. 判据
+
+`devtools/r213-diag.js` **7/7**：自己造前置（内置存储的小夹具先正常扫出 7 个事件，再对它下拉刷新，
+`keepList` 才成立），然后读 `lastDiagnosticsText`（与「复制诊断」给用户的是同一份，R180 的规矩）。
+
+## 4. 没做的那条：面板行高 39.2 px
+
+量清了：`.control-btn` 的 computed 是 **40×40**，但渲染出来 39.2 —— `header-actions-group` 那层有
+**0.98 的缩放**，宽高一起缩（176→172.5、40→39.2）。所以不是「行高定小了」。三个选项：
+**甲** 基准抬到 41（渲染 40.2，代价是 24 行共 +24 px）；**乙** 去掉那层 0.98（省高度，但横屏七列栅格要重验）；
+**丙** 接受 39.2。**等他拍**，本轮不动。

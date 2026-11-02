@@ -2420,6 +2420,12 @@ function markBoot(name, detail) {
     bootMarks[name] = { ms: Math.round(performance.now()), detail: detail === undefined ? null : detail };
 }
 
+/** R213 —— 与 `markBoot` 相反：**每次**都覆盖。`list` 只记第一次有列表那一拍，对大盘毫无意义
+ *  （第一次出现列表时通常只有几条），所以另记一条 `listLast`，诊断里两条并排读。 */
+function markBootLatest(name, detail) {
+    bootMarks[name] = { ms: Math.round(performance.now()), detail: detail === undefined ? null : detail };
+}
+
 function describeBoot() {
     const marks = Object.keys(bootMarks)
         .map(name => `${name}=${bootMarks[name].ms}${bootMarks[name].detail === null ? '' : ':' + bootMarks[name].detail}`);
@@ -15723,6 +15729,7 @@ class TeslaCamViewer {
             files: paths.length,
             truncated: !!report.truncated,
             streamBatches: previewState ? previewState.batches : 0,
+            streamTried: !!streamPreview,
             firstBatchMs: previewState ? previewState.firstBatchMs : 0,
             firstPreviewMs: previewState && previewState.firstRenderAt
                 ? Math.round(previewState.firstRenderAt - previewState.renderStartedAt) : 0,
@@ -16505,7 +16512,10 @@ class TeslaCamViewer {
         }
         // The first time this runs with rows behind it, the list is on screen. Non-empty is the
         // condition: an earlier empty pass would otherwise claim the mark and never be corrected.
-        if (this.eventGroups.length) markBoot('list', this.eventGroups.length);
+        if (this.eventGroups.length) {
+            markBoot('list', this.eventGroups.length);
+            markBootLatest('listLast', this.eventGroups.length);
+        }
         const dateFilter = this.dom.dateFilter.value;
         const eventFilter = this.dom.eventFilter.value;
         syncTypeFilterRow(this.dom.eventTypeSegments, eventFilter, i18n[this.currentLanguage]);
@@ -19834,9 +19844,13 @@ class TeslaCamViewer {
         if (this.lastScanStats) {
             const s = this.lastScanStats;
             const part = (value) => value === undefined ? '-' : value;
-            lines.push(`scan last wall=${part(s.wallMs)}ms native=${part(s.nativeMs)}ms walk=${part(s.walkMs)}ms stat=${part(s.statMs)}ms/${part(s.statSkipped)}skip dirs=${part(s.dirsCached)}/${part(s.dirsSeen)}cached sealed=${s.sealed ? '1' : '0'} probe=${part(s.probeMs)}ms/${part(s.probes)} map=${part(s.mapMs)}ms sidecar=${part(s.sidecarMs)}ms process=${part(s.processMs)}ms long=${part(s.longCount)}/${part(s.longMax)}ms files=${part(s.files)}${s.truncated ? ' truncated' : ''}`);
+            lines.push(`scan last wall=${part(s.wallMs)}ms native=${part(s.nativeMs)}ms walk=${part(s.walkMs)}ms stat=${part(s.statMs)}ms/${part(s.statSkipped)}skip dirs=${part(s.dirsCached)}/${part(s.dirsSeen)}cached sealed=${s.sealed ? '1' : '0'} probe=${part(s.probeMs)}ms/${part(s.probes)} map=${part(s.mapMs)}ms ${s.sidecarMs === undefined ? 'sidecar=n/a process=n/a（这一路不记账）' : `sidecar=${part(s.sidecarMs)}ms process=${part(s.processMs)}ms`} long=${part(s.longCount)}/${part(s.longMax)}ms files=${part(s.files)}${s.truncated ? ' truncated' : ''}`);
             if (s.streamBatches !== undefined) {
-                lines.push(`scan stream batches=${part(s.streamBatches)} first=${part(s.firstBatchMs)}ms firstPreview=${part(s.firstPreviewMs)}ms previews=${part(s.previewRenders)}/${part(s.previewMs)}ms`);
+                // R213：下拉刷新那条路**故意**不流式（列表已经是完整的）。以前这里照印 `batches=0`，
+                // 读起来像「流式坏了」—— 现在按真实成因写 n/a。
+                lines.push(s.streamTried === false
+                    ? 'scan stream n/a（下拉刷新不流式，列表已是完整的）'
+                    : `scan stream batches=${part(s.streamBatches)} first=${part(s.firstBatchMs)}ms firstPreview=${part(s.firstPreviewMs)}ms previews=${part(s.previewRenders)}/${part(s.previewMs)}ms`);
             }
         }
         if (this.lastListStats) {
