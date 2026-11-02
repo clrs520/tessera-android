@@ -1104,6 +1104,53 @@ fn parse_sidecar(text: &str) -> Option<SidecarRead> {
 /// 整份进内存，安卓直接 abort 掉进程。同一类上限在 SEI（32 MB `moov`）那里已经加过了。
 const MAX_SIDECAR_BYTES: u64 = 4 * 1024 * 1024;
 
+/// R212 —— `.part` 回收（丙案：用户在设置面板里手动清）。删文件，所以两道闸都在原生这一侧：
+/// `keep` 是当前这一单正在写的那个路径；另外**10 分钟内改过的一律不动**（进程被打死留下的残骸
+/// 不会这么新，而正写着的那个一定很新 —— 两条互相兜底，页面传错 `keep` 也删不到活的那一个）。
+/// `dry_run` 只数不删，页面靠它先报「有 N 个、共 X」再让他点第二下。
+#[derive(serde::Serialize)]
+struct PartCleanup {
+    found: usize,
+    bytes: u64,
+    removed: usize,
+    kept: usize,
+}
+
+#[tauri::command]
+async fn clean_part_files(dir: String, keep: String, dry_run: bool) -> Result<PartCleanup, String> {
+    blocking(move || {
+        let mut out = PartCleanup { found: 0, bytes: 0, removed: 0, kept: 0 };
+        let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(out) };
+        let now = std::time::SystemTime::now();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".mp4.part") {
+                continue;
+            }
+            let path = entry.path();
+            let held = !keep.is_empty() && path.to_string_lossy() == keep;
+            let fresh = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| now.duration_since(t).ok())
+                .map(|age| age.as_secs() < 600)
+                .unwrap_or(false);
+            if held || fresh {
+                out.kept += 1;
+                continue;
+            }
+            out.found += 1;
+            out.bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            if !dry_run && std::fs::remove_file(&path).is_ok() {
+                out.removed += 1;
+            }
+        }
+        Ok(out)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn read_sidecars(paths: Vec<String>) -> Result<Vec<SidecarRead>, String> {
     blocking(move || {
@@ -1323,6 +1370,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             write_binary_file,
+            clean_part_files,
             ensure_media_server,
             probe_readable,
             storage_status,

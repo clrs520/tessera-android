@@ -448,6 +448,11 @@
         usbFound: "Detected {label}: {path}",
         usbFoundClips: "Detected {label} with {folders} — tap “Choose folder” below to play straight from the stick.",
         about: "About",
+        cleanParts: "Leftovers",
+        cleanPartsTitle: "Clean unfinished exports (*.mp4.part)",
+        cleanPartsNone: "No unfinished exports",
+        cleanPartsAsk: "{n} unfinished export(s), {size} — tap again to delete",
+        cleanPartsDone: "Removed {n} file(s), {size} freed",
         aboutTitle: "About Tessera",
         aboutTagline: "Six-camera dashcam viewer for Tesla",
         aboutDevice: "Device",
@@ -985,6 +990,11 @@
         usbFound: "检测到 {label}：{path}",
         usbFoundClips: "检测到 {label}，里面有 {folders} —— 按下方「文件夹」选中它，就能直接从 U盘播放。",
         about: "关于",
+        cleanParts: "清理残片",
+        cleanPartsTitle: "清理未完成的导出（*.mp4.part）",
+        cleanPartsNone: "没有未完成的导出",
+        cleanPartsAsk: "有 {n} 个未完成的导出（{size}），6 秒内再点一次即删除",
+        cleanPartsDone: "已删除 {n} 个，释放 {size}",
         aboutTitle: "关于特写",
         aboutTagline: "特斯拉行车记录 · 六路同播",
         aboutDevice: "本机",
@@ -23240,6 +23250,7 @@ class TeslaCamViewer {
         if (!modal || this.aboutBound) return;
         this.aboutBound = true;
 
+        document.getElementById('cleanPartsBtn')?.addEventListener('click', () => this.cleanExportLeftovers());
         document.getElementById('aboutBtn')?.addEventListener('click', () => this.openAbout());
         document.getElementById('aboutCloseBtn')?.addEventListener('click', () => this.closeAbout());
         document.getElementById('aboutGithubBtn')?.addEventListener('click', () => {
@@ -23287,6 +23298,42 @@ class TeslaCamViewer {
         const qrImg = document.getElementById('aboutQrImg');
         if (qrImg) qrImg.alt = translations.aboutQrAlt;
         set('aboutLicenseNote', 'aboutLicenseNote');
+    }
+
+    /**
+     * R212 —— 设置面板的「清理残片」（丙案）。只删 `*.mp4.part`，两道救命闸都在原生命令里：
+     * 当前这一单的路径不删、10 分钟内改过的不删。第一下只报数，六秒内第二下才真删 —— 删文件
+     * 不该一次点击就发生。
+     */
+    async cleanExportLeftovers() {
+        const translations = i18n[this.currentLanguage];
+        const dir = this.lastExportDir || '/storage/emulated/0/Download';
+        const keep = this.peJob && this.peJob.outPath ? `${this.peJob.outPath}.part` : '';
+        const armed = this.cleanPartsArmedAt && Date.now() - this.cleanPartsArmedAt < 6000;
+        let res = null;
+        try {
+            res = await nativeInvoke('clean_part_files', { dir, keep, dryRun: !armed });
+        } catch (e) {
+            res = null;
+        }
+        if (!res || typeof res.found !== 'number') {
+            this.showToast(translations.cleanPartsNone, 'error', 4000);
+            return;
+        }
+        if (!armed) {
+            if (!res.found) {
+                this.showToast(translations.cleanPartsNone, 'info', 3000);
+                return;
+            }
+            this.cleanPartsArmedAt = Date.now();
+            haptic('light');
+            this.showToast(translations.cleanPartsAsk
+                .replace('{n}', res.found).replace('{size}', formatBytes(res.bytes)), 'info', 6000);
+            return;
+        }
+        this.cleanPartsArmedAt = 0;
+        this.showToast(translations.cleanPartsDone
+            .replace('{n}', res.removed).replace('{size}', formatBytes(res.bytes)), 'success', 4000);
     }
 
     async openAbout() {
@@ -27511,6 +27558,8 @@ class TeslaCamViewer {
         let outPath;
         try {
             outPath = this.peOutPath(plan);
+            // R212：记住导出落盘的目录，「清理残片」要在同一个目录里数/删。
+            this.lastExportDir = String(outPath).replace(/\/[^/]*$/, '');
             // A six-minute grid that dies at 97 % because the drive filled up costs the user the
             // whole wait and leaves a file the gallery will not open, so ask the volume first. The
             // estimate is the encoder's own formula, and a second press inside twenty seconds is
