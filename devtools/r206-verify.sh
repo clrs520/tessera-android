@@ -22,6 +22,14 @@ set -o pipefail
 cd "$(dirname "$0")/.." || exit 1
 ADB="${ADB:-C:/Users/Xingcong/AppData/Local/Android/Sdk/platform-tools/adb.exe}"
 DEV="${DEV:-emulator-5554}"
+# `font_scale` 在真机上就是用户自己的「字体大小」这一项设置，判据借它当 activity 重建的杠杆，
+# 等于替他改了系统设置（本轮在 e152f205 上写过一次，复原时连原值一起丢了）。⇒ 只有模拟器可以写。
+IS_EMULATOR=0
+case "$DEV" in emulator-*) IS_EMULATOR=1 ;; esac
+font_scale_put() {
+  if [ "$IS_EMULATOR" = 1 ]; then adb_run "settings put system font_scale $1";
+  else echo "   （真机：跳过 font_scale=$1 —— 那是用户的字体大小，不是判据的工具）"; fi
+}
 # 夹具改成主机侧 ffmpeg 生成（原先靠设备 `screenrecord`，MIUI 息屏会报 INVALID_LAYER_STACK，
 # 而且只能录出竖片）。解析顺序：显式 $FFMPEG → PATH 里的 ffmpeg → 本机装好的那一份。
 if [ -z "${FFMPEG:-}" ]; then
@@ -223,9 +231,10 @@ ASK_JS='(async () => {
 
 echo "== 1) N6 三次重建（改系统字号会重建 activity —— 但「重建」这件事要自己证明，否则差=0 是白捡的）"
 RC=0
+if [ "$IS_EMULATOR" = 1 ]; then
 for i in 1 2 3; do
   probe "(async () => { window.__r206gen = 'g$i'; return 'set'; })()" 20000 >/dev/null
-  adb_run "settings put system font_scale $([ $((i % 2)) -eq 1 ] && echo 1.15 || echo 1.0)"
+  font_scale_put "$([ $((i % 2)) -eq 1 ] && echo 1.15 || echo 1.0)"
   sleep 12
   probe "$ASK_JS" 60000 >/dev/null
   ALIVE="$(probe '(async () => JSON.stringify({ gen: window.__r206gen || "gone" }))()' 20000)"
@@ -234,16 +243,19 @@ for i in 1 2 3; do
     *) echo "   第 $i 次：页面还是那一份 ⇒ 这一次没重建（$ALIVE）";;
   esac
 done
-adb_run "settings put system font_scale 1.0"; sleep 12
+else
+  echo "   跳过：目标不是模拟器 ⇒ N6 的重建杠杆（font_scale）在真机上不许按"
+fi
+font_scale_put 1.0; sleep 12
 T1="$(pool_count)"
 echo "   T1（重建 $RC 次之后）=$T1"
-keep T1 "$T1"; keep RC "$RC"
+keep T1 "$T1"; keep RC "$RC"; keep IS_EMULATOR "$IS_EMULATOR"
 
 # 页面活着吗？连 `1+1` 都要 25 秒不回的 WebView，后面每一步都会「超时 ⇒ 空串 ⇒ 判据读不到值」。
 # 本轮实测：第 1 步那三次重建跑完，AVD 上的 JS 线程就不动了（进程在、焦点在、socket 在，
 # 唯独页面不回）。这不是判据要测的东西，但它会让整轮变成一串假的「前置不成立」。
 alive() { [ "$(probe '(() => "yes")()' 25000)" = "yes" ]; }
-revive() { adb_run "settings put system font_scale 1.0; am force-stop $PKG; am start -n $PKG/.MainActivity >/dev/null"; sleep 20; }
+revive() { font_scale_put 1.0; adb_run "am force-stop $PKG; am start -n $PKG/.MainActivity >/dev/null"; sleep 20; }
 
 echo "== 2) N4 多路导出 + 墙钟回拨 2 小时：进度回报的频率不许塌掉"
 if alive; then :; else echo "   页面不回话 ⇒ 重启 APP 再起量（这一支只修工具，不改结论）"; revive; fi
@@ -371,8 +383,14 @@ ok('前置：停服务之前那一单还在跑（否则「收手」没得测）'
 ok('前置：am 的回执说服务真的停了（工具没动手 ≠ 产品没收手）', !/error/i.test(v.STOP_OUT || ''), v.STOP_OUT);
 ok('前置：杀进程那一单还在跑、且写出了真实路径', running(beforeKill) && !!v.OUT3, JSON.stringify([beforeKill.job, v.OUT3]));
 
-ok('前置：activity 真的被重建了（页面换了一份）—— 否则这条线程账测的是没发生过的事', Number(v.RC) >= 2, `重建 ${v.RC} 次`);
-ok('N6 activity 重建不泄漏线程池线程（每次重建净增 0）', t1 - t0 <= 0, `${t0} → ${t1}，重建 ${v.RC} 次`);
+// N6 靠「重建了三次」证明线程池没有每次加一条。真机上这一整段是跳过的（不许动 font_scale），
+// 那 `t1 - t0 <= 0` 会在「什么都没发生过」上白捡一个通过 ⇒ 两条一起记 n/a，而不是记绿。
+if (Number(v.IS_EMULATOR) === 1) {
+    ok('前置：activity 真的被重建了（页面换了一份）—— 否则这条线程账测的是没发生过的事', Number(v.RC) >= 2, `重建 ${v.RC} 次`);
+    ok('N6 activity 重建不泄漏线程池线程（每次重建净增 0）', t1 - t0 <= 0, `${t0} → ${t1}，重建 ${v.RC} 次`);
+} else {
+    out.notes.N6 = 'n/a：目标是真机 ⇒ 判据不动 font_scale（那是用户的字体大小），重建这一段只在模拟器上跑';
+}
 // 基线窗口本身要有料：稳态里那一段若只出 1～2 条，比值是噪声（本轮第一版就是这么误红的）。
 ok('前置：拨钟前的稳态窗口里回报够密（否则「频率塌没塌」比的是噪声）', pre >= 0.4,
    `拨钟前 ${preS.toFixed(1)} 秒 ${a.n - a0.n} 条 = ${pre.toFixed(2)} 条/秒｜百分比 ${pct(a0)}→${pct(a)}`);

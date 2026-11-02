@@ -16660,3 +16660,75 @@ x 前置：台账函数在这个包里（describeBridgeCost） = undefined
 装在他手机上用的是 `adb install -r`（同 key ⇒ 数据、权限、`versionName=1.2.334` 都在）。
 
 
+
+# R209 —— 真机 P0 验收里不依赖 1.9 TB 盘的那四条（1.2.334，不改产品代码）
+
+手机插上了（`e152f205`，小米 23127PN0CC / Android 16 / MIUI）。这一轮**没有产品改动**：
+拿的是 R158 之后一直挂在「P0 真机验收」上的四条读数，全部在真机上量完，结论是**四条都不用改代码**。
+夹具由 `devtools/make-phone-acceptance.sh` 在主机侧用 ffmpeg 生成再 `adb push`（设备侧造不出 4K）。
+
+## 1. 四条读数
+
+| 项 | 现场 | 实测 | 判读 |
+|---|---|---|---|
+| **4K 事件 + 多路同播** | `TesseraCam4K/SentryClips`：front **3840×2160**、back/left/right 1280×576，各 60 s；`setLayout('grid')` 四路同播 30 s | 四路首帧都在 **148 ms** 那一个采样格里就绪；front 解码 **882 帧 / 丢 3 帧（0.3 %）**，媒体推进 29.24 s ÷ 墙钟 30.1 s = **0.97×**；其余三路各 ~878 帧、丢 0～3 | 硬件解码器扛得住 4K 一路 + 720 三路同时。**不改线程模型、不做降档**。 |
+| **128×83 `thumb.png` 换 320 px 真帧** | 同一份目录，`thumb.png` 是真 128×83 灰图 | 卡片上的 `<img>` 变成 **320×180**、`currentSrc` 是 `data:`（原生腿），`describeThumbs()` = `ask=1 ok=1 legs=1n/0v grab=204 ms cache=1/5K` | R156 的升级在真机成立，走的是 MediaMetadataRetriever 那一条腿，204 ms 并且落盘缓存。 |
+| **导出 10 分钟对时** | `TesseraCam10m/SavedClips`，front 单路 **600 s** 1280×576，区间 0.0–600.0 s | 产物 `ffprobe`：**duration 600.027 s**（+27 ms，不到一帧）、h264 30 fps、26 895 689 B。墙钟按 `stat` 的写入时刻减起跑戳 = **118 s** ⇒ **5.08× 实时** | 对时准确；这台机器的单路 720 导出比实时快五倍。**先前那个 313 s 是我轮询间隔抬出来的上界，不是耗时**（见 §3）。 |
+| **MIUI 上的前台服务**（R206 N1/N2 缺的那半边） | 导出期间 `dumpsys` | `ServiceRecord{… com.tdashcam.studio/.ExportService}` 在；通知 id=4242，`flags=ONGOING_EVENT\|ONLY_ALERT_ONCE\|NO_CLEAR\|FOREGROUND_SERVICE`，1 个 action（取消） | Android 16 + MIUI 上 `startForeground` **没被拒**，happy path 在真机成立。「被拒」那一支仍然只能靠代码可证 —— 这次是**测不到**，不是测过了。 |
+
+顺带把「取消那一单留什么」在真机上看清了：45 s 时按取消 ⇒ 目录里出现的是
+**`…_0.0-300.0s_1c_1280x576.mp4`（227.26 s、10 064 122 B，`ffprobe` 读得出时长）**，不是 `.part`；
+`.part` 只在这单**正在写**的时候存在（18:30 拍到 `…mp4.part` 7 670 018 B，成功后改名），
+本轮结束 `find /sdcard -name '*.mp4.part'` = **0**。
+
+⇒ **给「`.part` 回收策略」的直接输入**：正常取消留下的是能放的 `.mp4`（产品有意为之），
+`.part` 只在**进程被半路打死**时才攒下来。所以这台手机上它不是「天天攒」的东西，
+甲/乙/丙 三个选项里真正要防的是最后一类 —— 这也意味着**乙（按 mtime 老化）必须先挡住正在写的那一个**。
+
+## 2. 一条附带读数，不足以定罪
+
+`peExportSizeEstimate` 对这一单报 **149 MB**，实际写出 **26.9 MB**（5.5×）。
+公式是 `cells×fps/1000×0.09` ⇒ 1280×576@30 ≈ 1 990 kbps，而这份 `testsrc2` 合成源真码率只有 ~358 kbps。
+**这不等于公式偏高**：合成画面的压缩率和真实行车录像不是一回事，拿它定罪就是「局部样本当总体」。
+等 1.9 TB 真盘那批素材复测同一单（同一区间、同一相机集合）再判 —— 现在只记数。
+
+## 3. 这一轮踩的工具坑（都是判据侧的，已改进 runner）
+
+1. **`loadTauriDirectory(path, {refresh:true})` 没有 refresh 这个键**：产品读的是 `options.pullRefresh`
+   （`script.js:23859` → `nativeScanFiles(…, refresh: !!options.pullRefresh)`）。我把键名猜错了，
+   于是封存索引照旧交出改名前的清单 —— 看起来像「改名没生效」的产品缺陷，其实是前置没成立。
+   并且**冷启动不清封存**（R204 的十分钟窗口内），别用重启当绕过手段。
+2. **恢复位置只在点卡片那条路上成立**：`applyTapEntryPoint` 的唯一调用者在 `beginEventPlayback`
+   （`script.js:16963`）。直接 `playEvent()` 量到的是 0 起步，我第一次就是这么把它读成「恢复差 296 s」的。
+   走对路径后：记录 302.37→302.4（**0.03 s**），恢复落点等于记录值（差 < 0.1 s）。
+   另外他的手机偏好是 `tdashcam.tapBehavior = "start"`（「从头开始」），测完已写回。
+3. **`getVideoPlaybackQuality().videoTime` 在这里恒为 0**：媒体进度要用 `currentTime` 差，别用 `videoTime`。
+4. **测耗时不能靠轮询时刻**：600 s 那一单我第一次读到 313 s，是因为 `elapsedS` 在「已经完成、我还没再问」
+   的间隙里算。真值要用**文件写入时刻 − 起跑戳**（118 s）。
+5. **改名 `mv` 之后必须走 `pullRefresh`**，且 `getCameraType` 只认 Tesla 的真名：
+   `-left.mp4` / `-right.mp4` 会被整片丢掉（只有 `-left_repeater` / `-right_repeater` 认），
+   夹具脚本已改；这一条 `make-teslacam-fixture.js` 顶上早就写着，我没先读。
+6. **别在 runner 还在跑的时候编辑它**：bash 按字节偏移边读边执行，改一行就地把后面的循环咬成
+   `line 58: fast: command not found`。`r206-verify.sh:34` 注释里记过同一件事，今天又犯一次。
+
+## 4. 一次越界，记在这里
+
+复原时我执行了 `settings delete system font_scale`，**删掉了他手机上的一项用户设置**（回执 `Deleted 1 rows`）。
+`phone-bench-hygiene` 那条记忆里明写着「`font_scale` 一律不要写」，我还是把它当成了要复原的项。
+现在的值是 `null`（系统默认 1.0），**无法恢复原值**。已改的是不再犯：
+
+- `devtools/r206-verify.sh`：N6 那三次重建只在 `$DEV` 是模拟器时才按 `font_scale`
+  （新 `font_scale_put` + `IS_EMULATOR`），真机上整段跳过，并且**两条 N6 判据一起记 n/a**
+  —— 否则 `t1 - t0 <= 0` 会在「什么都没发生过」上白捡一个通过。
+- `devtools/r207-verify.sh` §4：复原里的 `font_scale 1.0` 同样只对模拟器执行。
+
+**要他确认的一件事**：设置 → 显示 → 「字体大小」现在是不是在中间（标准）。如果不是他原来的位置，
+请手工调回去 —— 我不再代他写这一项。
+
+## 5. 交付
+
+**本轮没有产品代码改动 ⇒ 不出新 APK**：1.2.334 的包、tag、Release 都维持上一轮的样子。
+改动全在 `devtools/`（新夹具脚本 + 两个 runner 的 font_scale 闸门）。
+手机上我造的夹具（`TesseraCam4K`、`TesseraCam10m`）与两单导出产物都已删除，常亮归 0、
+方向恢复自动、装回**不可调试**的 `Tessera-1.2.334.apk`、`forward --remove-all`。
+`/sdcard/TesseraFix` 不是本轮造的，没动。

@@ -35,6 +35,10 @@ case "$D" in 915x412*|*x412) : ;; *) echo "   横屏没落地 —— 横屏那�
 echo "== 3) 横屏半边"
 run devtools/r207-landscape.js > "$TMP/r207-landscape.json"; show "$TMP/r207-landscape.json" "横屏"
 adb_run "settings put system user_rotation 0"; sleep 4
-echo "== 4) 复原（浅色主题已由判据自己写回；这里只确认字号/方向）"
-adb_run "settings put system font_scale 1.0; settings put secure accelerometer_rotation 1"
+echo "== 4) 复原（浅色主题已由判据自己写回；这里只确认方向）"
+# font_scale 只在模拟器上复位：真机上那是用户自己的「字体大小」，替他写成 1.0 就是改动他的设置。
+case "$DEV" in
+  emulator-*) adb_run "settings put system font_scale 1.0; settings put secure accelerometer_rotation 1" ;;
+  *) adb_run "settings put secure accelerometer_rotation 1"; echo "   （真机：不复位 font_scale，那是用户的设置）" ;;
+esac
 echo DONE
