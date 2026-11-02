@@ -91,9 +91,15 @@ case "$GREEN" in *'"ok":true'*)
     cp "$C" ../Tessera-1.2.337.apk || die "复制失败"
     "$ADB" -s "$DEV" install -r ../Tessera-1.2.337.apk >>"$LOG" 2>&1 || say "  装正式包失败（不影响结论）"
     ;;
-    *) say "  不绿：源码退回并发补丁，1.2.336 仍是已知安全的那一份"
+    *) say "  不绿：退回并发补丁，并出正式包装回去"
        git checkout -- src-tauri/src/lib.rs
-       sed -i 's/"version": "1.2.337"/"version": "1.2.336"/' src-tauri/tauri.conf.json ;;
+       grep -q SIDECAR_READERS src-tauri/src/lib.rs && die "补丁没退干净"
+       # 版本号**不回退**：MIUI 拒绝降级（连 `-d` 也不放行），回退版本号等于回退不了包，
+       # 手机就会停在一个可调试的测试载具上过夜。这是 2026-11-02 手工补过的一次。
+       bash devtools/build-apk.sh >>"$LOG" 2>&1 || die "正式包构建失败"
+       R=$(ls -t src-tauri/gen/android/app/build/outputs/apk/*/re*se/*.apk | head -1)
+       "$ADB" -s "$DEV" install -r "$R" >>"$LOG" 2>&1 || say "  装正式包失败，需要人处理"
+       "$ADB" -s "$DEV" shell "dumpsys package $PKG | grep -m1 'flags=\['" 2>&1 | head -1 | tee -a "$LOG" ;;
 esac
 N2=$(drive_count); say "== 5) 收尾再数一次盘（前后都该是同一块）：$N2"
 "$ADB" -s "$DEV" shell "dumpsys package $PKG | grep -m1 versionName" 2>&1 | head -1 | tee -a "$LOG"

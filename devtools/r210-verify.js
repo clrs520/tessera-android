@@ -20,13 +20,19 @@
     const DRIVE = String(v.lastScannedPath
         || (JSON.parse(localStorage.getItem('tdashcam.recentDirs') || '[]')[0] || '')).replace(/\/+$/, '');
     const VOL = DRIVE.split('/').slice(0, 3).join('/');   // /storage/B086-9116
-    const volumePresent = () => {
-        try { return String(v.storageVolumesJson ? v.storageVolumesJson() : '').indexOf(VOL) >= 0; }
-        catch (e) { return true; }
+    // R210b：这里原来用 `v.storageVolumesJson()` —— 页面里没有这个方法，于是「卷还挂着」恒红，
+    // 两次跑各带出一条假红。卷列表只有 `getStorageVolumes(forceRefresh)` 这一个入口（script.js:2818），
+    // 而且是 async 的，所以判据自己把它读进来、扫完再读一次做对照。
+    let volText = '';
+    const readVolumes = async () => {
+        try { volText = JSON.stringify(await getStorageVolumes(true)); }
+        catch (e) { volText = ''; }
     };
+    const volumePresent = () => volText.indexOf(VOL) >= 0;
+    await readVolumes();
     ok('前置：页面记得一个外接盘目录（不是手机存储）',
         /^\/storage\/(?!emulated)/.test(DRIVE), `dir=${DRIVE || '(空)'}`);
-    ok('前置：这块盘的卷还挂着', volumePresent(), `vol=${VOL}`);
+    ok('前置：这块盘的卷还挂着', volumePresent(), `vol=${VOL} 列表=${volText.slice(0, 80)}`);
 
     try { localStorage.removeItem('tdashcam.sidecarCache.v1'); } catch (e) { /* 写不下也算没缓存 */ }
     await sleep(200);
@@ -36,6 +42,7 @@
     const s = v.lastScanStats || {};
     const groups = v.eventGroups || [];
     // 扫完立刻再数一次盘。这一条不通，后面所有时间账与失败数都不作数 —— 上一轮就是死在这里。
+    await readVolumes();
     ok('前置：扫描期间盘没掉（扫前后卷都在，且文件数与上次同级）',
         volumePresent() && (s.files || 0) >= 65000,
         `files=${s.files} 卷在=${volumePresent()}`);
