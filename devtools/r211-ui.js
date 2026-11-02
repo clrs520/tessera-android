@@ -25,8 +25,11 @@
             // 还没记过目录：用产品自己的卷列表找那块外接盘（不写死卷号）。
             try {
                 const vols = await getStorageVolumes(true);
-                const list = typeof vols === 'string' ? JSON.parse(vols) : vols;
-                const usb = (list || []).map(x => (typeof x === 'string' ? x : x.path || x.id || ''))
+                // 回的是 `{volumes:[…], usbDevices:n}` 这个对象，不是裸数组（`storageVolumesJson` 那边
+                // 同一形状）。以前在这儿对对象调 `.map` 会抛错、又被下面的 catch 吞掉，于是恒 `(none)`。
+                const parsed = typeof vols === 'string' ? JSON.parse(vols) : vols;
+                const arr = Array.isArray(parsed) ? parsed : ((parsed && parsed.volumes) || []);
+                const usb = arr.map(x => (typeof x === 'string' ? x : (x && (x.path || x.id)) || ''))
                     .find(p => /^\/storage\//.test(p) && !/^\/storage\/emulated/.test(p));
                 if (usb) dir = String(usb).replace(/\/+$/, '') + '/TeslaCam';
             } catch (e) { /* 落空就落空，下面照判 */ }
