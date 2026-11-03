@@ -1589,22 +1589,11 @@ body.dark-theme #eventFilter {
    Sideways the card sits in the letterband at the top and cannot collide, and `bottom` there is
    `auto` by design — hence portrait-only, so this rule never outranks it. */
 @media (hover: none) and (pointer: coarse) and (orientation: portrait) {
-    /* R122 用户第二次提同一件事：「『复制诊断』后面没有选项」。占满整行他仍然读成空一格 ——
-       他要的是**旁边有东西**。所以把「关于」提上来跟它配对（DOM 顺序改了，见 index.html），
-       这里改成让**语言开关**占满整行：不这么改的话，它会变成新的空一格。 */
-    /* R124 · 用户：「设置里面的『关于』一般都是放到最后面的」。于是把 关于 放回最后一行，并且
-       给它**整行**——它是列表的页脚，独占一行读起来是有意的；中间那条 复制诊断 则和「手势说明」配对
-       （两条都是「看一眼/导一份」的辅助动作），这样「其他」里不再有孤零零的半格。 */
-    html.touch-ui .header-collapsed .header-actions-group #aboutBtn {
-        grid-column: 1 / -1;
-    }
-
-    /* R214 —— 「清理残片」插在 语言/亮度 那一行之后、关于 之前，2 栏栅格里只剩它半格，
-       看着像漏了一项。它是维护动作，不是与旁边那条成对的开关 ⇒ 给它整行，
-       与「主题切换」「关于」两行整行同一形态（用户原话：「单独一行的，不美观」）。 */
-    html.touch-ui .header-collapsed .header-actions-group #cleanPartsBtn {
-        grid-column: 1 / -1;
-    }
+    /* R215 · 用户拍板：「让 清理残片 和 关于 配成一行（关于 不再独占）」。
+       R124 曾把 关于 钉成整行页脚，代价是它上面那条 清理残片 只剩半格独行（R214 的第一版改成
+       整行，读起来仍是一行只有一个人）。现在两条都不再跨列 —— 「其他」这组里成对的行是
+       选择文件夹+刷新列表 / 复制诊断+手势说明 / 亮度+语言 / 清理残片+关于，
+       整行的只剩 主题 与三条直选（`.menu-choice`，见 7138），那几条本来就要占满。 */
 
     /* The strip lives 10 px above the top of the control band it is inside, so clearing the band by
         `--meta-bottom` leaves the card's hem 4 px over the frames. 6 px more is the whole fix for
