@@ -393,6 +393,98 @@ fn volume_dev(_path: &str) -> Option<u64> {
     None
 }
 
+/// The per-root index file lives in the app cache dir, named by a hash of the root path.
+/// `ScanIndex::load` and `scan_index_dirty` must name the same file for the same root, so
+/// the computation lives here. `None` means no cache dir was set up (desktop).
+fn index_file_path(root: &str) -> Option<std::path::PathBuf> {
+    let dir = SCAN_INDEX_DIR.get()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    root.hash(&mut hasher);
+    Some(dir.join(format!("scan-tree-{:016x}.tsv", hasher.finish())))
+}
+
+/// What one index file decodes to, before the `sealed` decision. Split from the file I/O so
+/// the wire format has unit tests (a mis-parsed line silently drops a cached subtree, which
+/// is exactly the kind of regression that only shows up as 「第二次扫描怎么又慢了」).
+#[derive(Default)]
+struct ParsedScanIndex {
+    /// The `V<TAB><dev>` header line; `None` when absent or malformed (R199).
+    header_dev: Option<u64>,
+    sizes: HashMap<String, u64>,
+    listings: HashMap<String, (u64, Vec<(String, bool)>)>,
+}
+
+/// R194 — 文件名换了：旧文件是「size\tpath」，新文件带记录类型，读串了会把路径当成尺寸。
+fn parse_scan_index(text: &str) -> ParsedScanIndex {
+    let mut out = ParsedScanIndex::default();
+    let mut lines = text.lines();
+    out.header_dev = lines
+        .next()
+        .and_then(|line| line.strip_prefix("V\t"))
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    for line in lines {
+        let mut parts = line.split('\t');
+        match parts.next() {
+            Some("F") => {
+                let (Some(size), Some(path)) = (parts.next(), parts.next()) else { continue };
+                if let Ok(size) = size.parse::<u64>() {
+                    if !path.is_empty() {
+                        out.sizes.insert(path.to_string(), size);
+                    }
+                }
+            }
+            Some("D") => {
+                let (Some(stamp), Some(path)) = (parts.next(), parts.next()) else { continue };
+                let Ok(stamp) = stamp.parse::<u64>() else { continue };
+                let mut names = Vec::new();
+                while let Some(name) = parts.next() {
+                    let flag = parts.next().unwrap_or("0");
+                    names.push((name.to_string(), flag == "1"));
+                }
+                out.listings.insert(path.to_string(), (stamp, names));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The file body for one finished scan. `render_scan_index` and `parse_scan_index` are the
+/// two halves of the format and are tested against each other.
+fn render_scan_index(
+    dev: Option<u64>,
+    files: &[String],
+    sizes: &[u64],
+    listings: &HashMap<String, (u64, Vec<(String, bool)>)>,
+) -> String {
+    let mut out = String::with_capacity(files.len() * 48);
+    // R199 — 头一行记下写这份索引时的卷设备号；下次挂载对不上就不敢「不问 mtime」。
+    out.push_str("V\t");
+    out.push_str(&dev.unwrap_or(0).to_string());
+    out.push('\n');
+    for (path, size) in files.iter().zip(sizes.iter()) {
+        out.push_str("F\t");
+        out.push_str(&size.to_string());
+        out.push('\t');
+        out.push_str(path);
+        out.push('\n');
+    }
+    for (dir, (stamp, names)) in listings.iter() {
+        out.push_str("D\t");
+        out.push_str(&stamp.to_string());
+        out.push('\t');
+        out.push_str(dir);
+        for (name, is_dir) in names {
+            out.push('\t');
+            out.push_str(name);
+            out.push('\t');
+            out.push(if *is_dir { '1' } else { '0' });
+        }
+        out.push('\n');
+    }
+    out
+}
+
 impl ScanIndex {
     fn empty() -> Self {
         ScanIndex {
@@ -407,13 +499,9 @@ impl ScanIndex {
     }
 
     fn load(root: &str, allow_sealed: bool) -> Self {
-        let Some(dir) = SCAN_INDEX_DIR.get() else {
+        let Some(file) = index_file_path(root) else {
             return ScanIndex::empty();
         };
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        root.hash(&mut hasher);
-        // R194 — 文件名换了：旧文件是「size\tpath」，新文件带记录类型，读串了会把路径当成尺寸。
-        let file = dir.join(format!("scan-tree-{:016x}.tsv", hasher.finish()));
         let dev = volume_dev(root);
         let mut index = ScanIndex {
             sizes: HashMap::new(),
@@ -425,41 +513,15 @@ impl ScanIndex {
             dirs_reused: 0,
         };
         let Ok(text) = std::fs::read_to_string(&file) else { return index };
-        let mut lines = text.lines();
+        let parsed = parse_scan_index(&text);
         // R199 — 头一行 `V<TAB><dev>`；同一次挂载 + 没有脏标记，才允许「不问 mtime 直接信清单」。
-        let header_dev = lines
-            .next()
-            .and_then(|line| line.strip_prefix("V\t"))
-            .and_then(|value| value.trim().parse::<u64>().ok());
         index.sealed = allow_sealed
             && !file.with_extension("dirty").exists()
-            && header_dev.is_some()
-            && header_dev == dev
+            && parsed.header_dev.is_some()
+            && parsed.header_dev == dev
             && written_within(&file, 10);
-        for line in lines {
-            let mut parts = line.split('\t');
-            match parts.next() {
-                Some("F") => {
-                    let (Some(size), Some(path)) = (parts.next(), parts.next()) else { continue };
-                    if let Ok(size) = size.parse::<u64>() {
-                        if !path.is_empty() {
-                            index.sizes.insert(path.to_string(), size);
-                        }
-                    }
-                }
-                Some("D") => {
-                    let (Some(stamp), Some(path)) = (parts.next(), parts.next()) else { continue };
-                    let Ok(stamp) = stamp.parse::<u64>() else { continue };
-                    let mut names = Vec::new();
-                    while let Some(name) = parts.next() {
-                        let flag = parts.next().unwrap_or("0");
-                        names.push((name.to_string(), flag == "1"));
-                    }
-                    index.listings.insert(path.to_string(), (stamp, names));
-                }
-                _ => {}
-            }
-        }
+        index.sizes = parsed.sizes;
+        index.listings = parsed.listings;
         index
     }
 
@@ -495,31 +557,7 @@ impl ScanIndex {
         if files.len() != sizes.len() || files.is_empty() {
             return;
         }
-        let mut out = String::with_capacity(files.len() * 48);
-        // R199 — 头一行记下写这份索引时的卷设备号；下次挂载对不上就不敢「不问 mtime」。
-        out.push_str("V\t");
-        out.push_str(&self.dev.unwrap_or(0).to_string());
-        out.push('\n');
-        for (path, size) in files.iter().zip(sizes.iter()) {
-            out.push_str("F\t");
-            out.push_str(&size.to_string());
-            out.push('\t');
-            out.push_str(path);
-            out.push('\n');
-        }
-        for (dir, (stamp, names)) in self.listings.iter() {
-            out.push_str("D\t");
-            out.push_str(&stamp.to_string());
-            out.push('\t');
-            out.push_str(dir);
-            for (name, is_dir) in names {
-                out.push('\t');
-                out.push_str(name);
-                out.push('\t');
-                out.push(if *is_dir { '1' } else { '0' });
-            }
-            out.push('\n');
-        }
+        let out = render_scan_index(self.dev, files, sizes, &self.listings);
         let tmp = file.with_extension("tmp");
         if std::fs::write(&tmp, out).is_ok() {
             if std::fs::rename(&tmp, file).is_ok() {
@@ -1175,10 +1213,7 @@ async fn read_sidecars(paths: Vec<String>) -> Result<Vec<SidecarRead>, String> {
 /// 下一次扫描退回逐目录校验，扫完再重新封存。
 #[tauri::command]
 fn scan_index_dirty(path: String) -> bool {
-    let Some(dir) = SCAN_INDEX_DIR.get() else { return false };
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut hasher);
-    let file = dir.join(format!("scan-tree-{:016x}.tsv", hasher.finish()));
+    let Some(file) = index_file_path(&path) else { return false };
     if !file.exists() {
         return false;
     }
@@ -1396,4 +1431,195 @@ pub fn run() {
     builder
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- the index wire format: render ↔ parse must agree ----
+
+    #[test]
+    fn scan_index_round_trips() {
+        let files = vec!["/a/RecentClips/x-front.mp4".to_string(), "/a/b.png".to_string()];
+        let sizes = vec![123u64, 4];
+        let mut listings = HashMap::new();
+        listings.insert(
+            "/a/RecentClips".to_string(),
+            (99u64, vec![("x-front.mp4".to_string(), false), ("sub".to_string(), true)]),
+        );
+        let text = render_scan_index(Some(4242), &files, &sizes, &listings);
+        let parsed = parse_scan_index(&text);
+        assert_eq!(parsed.header_dev, Some(4242));
+        assert_eq!(parsed.sizes.get("/a/b.png"), Some(&4));
+        assert_eq!(parsed.sizes.len(), 2);
+        let (stamp, names) = parsed.listings.get("/a/RecentClips").expect("listing kept");
+        assert_eq!(*stamp, 99);
+        assert_eq!(names[0], ("x-front.mp4".to_string(), false));
+        assert_eq!(names[1], ("sub".to_string(), true));
+    }
+
+    #[test]
+    fn scan_index_parses_real_shapes_and_skips_junk() {
+        let text = "V\t0\n\
+                    F\t100\t/big.mp4\n\
+                    F\tnot-a-number\t/dropped.mp4\n\
+                    F\t5\n\
+                    X\twhatever\n\
+                    D\t7\t/dir\tone.mp4\t1\ttwo.mp4\t0\todd-name\n";
+        let parsed = parse_scan_index(text);
+        assert_eq!(parsed.header_dev, Some(0));
+        assert_eq!(parsed.sizes.get("/big.mp4"), Some(&100));
+        assert_eq!(parsed.sizes.len(), 1, "malformed F lines are dropped");
+        let (stamp, names) = parsed.listings.get("/dir").expect("D line kept");
+        assert_eq!(*stamp, 7);
+        // A missing trailing flag counts as "not a directory" (the reader's `unwrap_or("0")`).
+        assert_eq!(
+            names,
+            &vec![
+                ("one.mp4".to_string(), true),
+                ("two.mp4".to_string(), false),
+                ("odd-name".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_index_without_header_is_not_sealable() {
+        let parsed = parse_scan_index("F\t1\t/x.mp4\n");
+        assert_eq!(parsed.header_dev, None);
+    }
+
+    // ---- what the walk keeps ----
+
+    #[test]
+    fn media_filter_accepts_only_player_names() {
+        assert!(is_media_file("/a/2026-01-01_00-00-00-front.mp4"));
+        assert!(is_media_file(r"C:\a\b.PNG"));
+        assert!(is_media_file("/a/event.json"));
+        assert!(is_media_file("/a/thumb.jpg"));
+        assert!(!is_media_file("/a/notes.txt"));
+        assert!(!is_media_file("/a/clip.mp4.bak"));
+        assert!(!is_media_file("event.jsonx"));
+    }
+
+    #[test]
+    fn front_clip_is_the_reference_feed() {
+        assert!(is_front_clip("/a/2026-01-01_00-00-00-front.mp4"));
+        assert!(is_front_clip("/a/front-2026-01-01_00-00-00.mp4"));
+        assert!(!is_front_clip("/a/2026-01-01_00-00-00-back.mp4"));
+        assert!(!is_front_clip("/a/rear-front.mp4.txt"));
+    }
+
+    #[test]
+    fn clip_stamp_groups_one_minute_across_cameras() {
+        let dir = "/stick/RecentClips/2026-10-08_11-42-42";
+        let key = |name: &str| clip_stamp_key(&format!("{dir}/{name}"));
+        let front = key("2026-10-08_11-42-42-front.mp4");
+        assert_eq!(front, key("2026-10-08_11-42-42-back.mp4"));
+        assert_eq!(front, key("2026-10-08_11-42-42-left_repeater.mp4"));
+        // Same minute marker but a different start second is a different clip.
+        assert_ne!(front, key("2026-10-08_11-42-08-front.mp4"));
+        // Non-stamped names keep their own bucket.
+        assert_eq!(key("clip.mp4"), format!("{dir}/clip.mp4"));
+        // No directory separator: the path is its own key.
+        assert_eq!(clip_stamp_key("solo.mp4"), "solo.mp4");
+    }
+
+    #[test]
+    fn category_order_puts_recent_first() {
+        assert_eq!(category_rank("RecentClips"), 0);
+        assert_eq!(category_rank("savedclips"), 1);
+        assert_eq!(category_rank("SentryClips"), 2);
+        assert_eq!(category_rank("Music"), 3);
+    }
+
+    #[test]
+    fn teslacam_root_is_recognised_by_child_names() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Callers pass `dir_name()` output, which is already lowercased.
+        assert!(clip_folder(&names(&["recentclips", "x"])));
+        assert!(clip_folder(&names(&["savedclips"])));
+        assert!(clip_folder(&names(&["sentryclips"])));
+        assert!(!clip_folder(&names(&["dcim", "download"])));
+    }
+
+    // ---- duration bookkeeping ----
+
+    #[test]
+    fn clip_lengths_group_and_answer_per_file() {
+        let mut lengths = ClipLengths::default();
+        // These paths do not exist, so every probe answers None — the grouping and the
+        // per-file answers are what this test pins down, not the measured values.
+        // A slot is only filled by a *successful* probe, so while everything fails each
+        // file of the group tries once: three files, three probes, no growth beyond that.
+        lengths.note("/e/2026-01-01_00-00-00-front.mp4");
+        lengths.note("/e/2026-01-01_00-00-00-back.mp4");
+        lengths.note("/e/2026-01-01_00-00-00-left_repeater.mp4");
+        lengths.note("/e/event.json");
+        assert_eq!(lengths.probes, 3, "every file retries while probes keep failing");
+        assert_eq!(lengths.per_file, vec![0, 0, 0, NO_CLIP_GROUP]);
+        assert_eq!(lengths.finish(), vec![0, 0, 0, 0]);
+        assert_eq!(lengths.duration_at(0), 0);
+        assert_eq!(lengths.duration_at(3), 0);
+        assert_eq!(lengths.duration_at(99), 0, "out of range answers 0");
+    }
+
+    #[test]
+    fn clip_lengths_honour_probe_budget() {
+        let mut lengths = ClipLengths::default();
+        for minute in 0..(MAX_DURATION_PROBES + 5) {
+            lengths.note(&format!("/e/2026-01-01_00-{minute:02}-00-front.mp4"));
+        }
+        assert_eq!(lengths.probes, MAX_DURATION_PROBES);
+    }
+
+    #[test]
+    fn walk_budget_spends_on_either_limit() {
+        let mut budget = WalkBudget::default();
+        assert!(!budget.spent());
+        budget.files = MAX_SCAN_FILES;
+        assert!(budget.spent());
+        budget.files = 0;
+        budget.dirs = MAX_SCAN_DIRS;
+        assert!(budget.spent());
+    }
+
+    // ---- freshness guards ----
+
+    #[test]
+    fn fresh_stamps_and_the_future_are_not_trusted() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        assert!(stamp_is_fresh(now), "just-changed dirs are not recorded");
+        assert!(stamp_is_fresh(now + 1_000_000_000), "clock rollback is fresh");
+        assert!(!stamp_is_fresh(now - 60 * 1_000_000_000));
+    }
+
+    // ---- sidecar parsing ----
+
+    #[test]
+    fn sidecar_numbers_come_as_json_or_strings() {
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"est_lat": 1.5, "est_lon": "-2.25"}"#).unwrap();
+        assert_eq!(sidecar_number(&value, "est_lat"), Some(1.5));
+        assert_eq!(sidecar_number(&value, "est_lon"), Some(-2.25));
+        assert_eq!(sidecar_number(&value, "missing"), None);
+        assert_eq!(sidecar_number(&value, "est_lat"), Some(1.5));
+    }
+
+    #[test]
+    fn sidecar_fields_are_kept_verbatim() {
+        let text = r#"{"city":"上海","street":"南京路","timestamp":"1698nr","est_lat":"31.2","reason":"AEB"}"#;
+        let read = parse_sidecar(text).expect("valid json parses");
+        assert!(read.ok);
+        assert_eq!(read.city.as_deref(), Some("上海"));
+        assert_eq!(read.street.as_deref(), Some("南京路"));
+        assert_eq!(read.reason.as_deref(), Some("AEB"));
+        assert_eq!(read.lat, Some(31.2));
+        assert!(read.skipped.is_none());
+        assert!(parse_sidecar("not json").is_none());
+    }
 }

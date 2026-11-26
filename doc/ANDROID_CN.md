@@ -16979,3 +16979,77 @@ AVD 竖屏截图（1080×2400 @420dpi，CSS 视口 411×914）：`亮度：跟�
   就是老坑「AVD 饿死时 WebView 永不 attach，不是包坏」。
 
 ⇒ 这一条改动的**目视**证据有了，**数值**证据等任一面恢复后补跑；版本号已经并到 1.2.343。
+
+# R216 —— 交接后第一轮：刷新 276.7 s 的归因改口 + 扫描索引的单测落地
+
+> 环境：AVD 冷启动恢复（`emulator -avd tdashcam_phone -no-window -no-audio -gpu auto
+> -no-snapshot-load -no-boot-anim`），1.2.343 可调试载具，CDP 端口 9450。
+> 本轮**没有改任何产品行为**；Rust 侧只做去重与测试，前端一字未动。
+
+## 0. 先记两个环境坑（本轮实测）
+
+- **AVD 上整个包被 shell disable 过**：`am start` 报 `Error type 3 / Activity class … does not exist`，
+  `dumpsys package` 里 `lastDisabledCaller: shell:1000`。组件级 `pm enable` 会被拒
+  （Shell cannot change component state），要**包级** `pm enable com.tdashcam.studio` 才救得回来。
+  冷启动后 APP 起不来先查这个，别怀疑包坏。
+- 恢复后的老会话目录若是 0 字节夹具（TeslaCamR156 全是 0 字节 mp4），r102 基准四条会一起红：
+  「单路画面是横向的 = null / 0 路纹理」。**先切到有真片的夹具再跑判据**（AVD 上
+  `TeslaCamMulti` 144 段全有 moov，`TeslaCamBig2` 396/1512 有 moov，`TeslaCam` 是合成桩只有 ftyp+填充）。
+- 页内打开事件要用 `viewer.playEvent(eventId字符串)`；传对象会被 `if (!event)` 安静吞掉（老坑再证）。
+- 本轮基线：`r102-verify` 竖屏 **91 通过 / 2 红**，两条红都是 `.menu-lifted` 那组
+  （「单独挂类=50」），独立探针在干净状态读 `getComputedStyle` 是 1700，套件内跑完长按菜单
+  那几条之后再量就变 50 —— 疑为套件内状态残留，与 1.2.343 前端（本轮未动）无关，挂起待查。
+
+## 1. 「下拉刷新逐目录 readdir 276.7 s」这条改口（交接文档未了事项 3）
+
+新造夹具 `/sdcard/TeslaCamR216`（402 目录 / 2 400 文件，0 字节 mp4，只测扫描逻辑），同一进程内三档：
+
+| 这一趟 | wall | walk | dirs(cached/seen) | sealed |
+|---|---|---|---|---|
+| 冷扫（建索引） | 6 243 ms | 5 232 ms | 0/401 | false |
+| 紧随的普通扫 | 1 307 ms | 960 ms | 401/401 | **true** |
+| **下拉刷新**（refresh:true） | 3 631 ms | 3 388 ms | **401/401** | false |
+
+⇒ **刷新路径没有全量 readdir**：目录清单缓存照常整份复用（401/401 cached），它只对每个目录付一次
+mtime `stat`（这是「用户要求去看盘」的必要成本，也是刷新比封存扫描慢的部分）。真盘 276.7 s 的
+最可能解释：那是那次挂载之后的**第一次全树触达**，2 812 次 FUSE stat 往返在盘抖动时每趟 ~100 ms；
+紧随的 8.75 s 普通扫吃的是热内核缓存，不是代码差异。R210「44.3 s 目录 stat」与「276.7 s readdir」
+应是同一件事的冷/热两档，当时把第二档误读成了「readdir」。
+
+**「刷新后那次 sealed=false」也解释了**：`scan_index_dirty`（删除后标脏）会把封存禁用到下一次
+扫描写回索引为止——AVD 复现：标脏后普通扫 `sealed=false` 且依旧 1 198 ms / 401/401 cached
+（mtime 校验路线，不受影响）。而**不标脏的序列**「刷新→普通扫」AVD 上 sealed=true 正常。真盘
+那次 `sealed=false` 应是 r210/r211 harness 中间做过删除类操作，按设计工作，不是缺陷。
+
+⇒ 结论：**扫描缓存没有可修的 bug**，「延长封存窗口」收益上限维持原判（~2.6 s → ~0.8 s 量级）。
+真盘待回来后只需补一个「不标脏的刷新→普通扫」读数定案。
+
+## 2. Rust 侧结构去重 + 单元测试（桌面行为不变）
+
+- `scan-tree-<hash>.tsv` 的文件名计算在 `ScanIndex::load` 与 `scan_index_dirty` 各写一份
+  （改一处漏一处会把脏标记写到别的文件上），抽成 `index_file_path(root)`；
+- 索引 TSV 的解析/渲染从 `load`/`save` 的内联循环抽成 `parse_scan_index` / `render_scan_index`
+  一对纯函数，格式有了可测试的形状；
+- `#[cfg(test)]` 新增 14 条单测：格式 round-trip（render↔parse 对拍）、坏行丢弃、缺头不封存、
+  媒体名过滤、front 判定、同分钟分组、类别排序、TeslaCam 目录识别（调用方传入的是已小写名）、
+  时长记账（探测失败时每个文件重试、预算上限）、预算双限、新鲜戳、侧车字符串/数字两形态。
+  纯逻辑在脱壳脚手架里实跑 **14/14 绿**；host 的 `cargo test` 可执行文件在本机有
+  STATUS_ENTRYPOINT_NOT_FOUND 的 DLL 装载问题（未改动的基线同样如此，与本轮改动无关），
+  用 `cargo check --tests` 验编译。Android 侧以 APK 构建通过为准。
+- 前端（`src/script.js` / `styles.css` / `index.html`）本轮一字未动。
+
+## 3. 验收与交付
+
+- **r102-verify 竖屏**：改动前 1.2.343 **91/2**（两条 `.menu-lifted` 疑为套件内残留，见 §0）；
+  新构建同样 **91/2**，逐条相同 ⇒ 无回归。
+- **r215-settings**：修正判据后半格算法后 **9/9 绿**（1.2.343 与新构建各跑一遍）。
+- **扫描缓存行为**：新构建上冷扫/普通扫/刷新三档与 §1 读数同形状
+  （刷新 401/401 cached、sealed=false；普通扫 sealed=true）。
+- 版本号 1.2.343 → **1.2.344**（`tauri.conf.json`），`npx tauri android build` 通过
+  （`Finished 1 APK`，aarch64+x86_64 universal）。
+- **交付**：`Tessera-1.2.344.apk` 28 580 287 B，md5 `67b796ff9bfd469eac31101a7abfdfec`，
+  sha256 `599ef527b8e10d3de84ee95a8780411543423c6c8512b0247475c23f5744882e`。
+  AVD 上装包/启动验证过（versionName=1.2.344）；**真机没装**（无线调试仍断，等他重开）。
+  不打 tag、不挂 Release（tag 仍只有 v1.2.334，要不要发由他决定）。
+- R216 夹具复造（复原清单已删，要用再建）：
+  `adb shell "mkdir -p /sdcard/TeslaCamR216/RecentClips; i=1; while [ $i -le 400 ]; do d=$(printf '/sdcard/TeslaCamR216/RecentClips/2026-10-%02d_%02d-%02d-00' $((i%28+1)) $((i%24)) $((i%60))); mkdir -p $d; for c in front back left_repeater right_repeater left_pillar right_pillar; do : > $d/2026-10-$(printf '%02d' $((i%28+1)))_$(printf '%02d' $((i%24)))-$(printf '%02d' $((i%60)))-00-$c.mp4; done; i=$((i+1)); done"`

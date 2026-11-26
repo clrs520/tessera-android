@@ -30,12 +30,16 @@
 
     const gw = box(group).w;
     const c = box(clean), a = box(about), l = box(lang), b = box(bright);
-    const half = gw * 0.5 - 2;   // 两栏之间的 gap 是 4px
+    // R216 — 「半格」要按**网格内容宽**算：`.header-actions-group` 自带左右 5px 内边距
+    // （面板 368 → 内容 358 → 半格 177），拿面板全宽对半会凭空红 5 px。
+    const gcs = getComputedStyle(group);
+    const gridW = gw - parseFloat(gcs.paddingLeft) - parseFloat(gcs.paddingRight);
+    const half = gridW * 0.5 - 2;   // 两栏之间的 gap 是 4px
 
     ok('「清理残片」与「关于」同一行（top 差 ≤1 px）', sameRow(c, a), `clean.t=${c.t.toFixed(1)} about.t=${a.t.toFixed(1)}`);
     ok('两条等宽（±1 px）且都是**半格**（≤ 面板 55%）',
         Math.abs(c.w - a.w) <= 1 && c.w <= gw * 0.55 && c.w >= half - 2,
-        `clean=${c.w.toFixed(1)} about=${a.w.toFixed(1)} panel=${gw.toFixed(1)} 半格应为≈${half.toFixed(1)}`);
+        `clean=${c.w.toFixed(1)} about=${a.w.toFixed(1)} panel=${gw.toFixed(1)} 网格=${gridW.toFixed(1)} 半格应为≈${half.toFixed(1)}`);
 
     // 这一条就是「不是被英文标签挤的」的证据：列宽由 `repeat(2, minmax(0,1fr))` 定，
     // 与内容无关 ⇒ 语言那一格必须和清理残片那一格同宽。
